@@ -92,7 +92,7 @@ def test_launchd_plist_and_unattended_gate(cfg, tmp_path):
     cfgp = tmp_path / "workforce.yaml"
     cfgp.write_text("")
     pl = daemon.build_plist(cfg, cfgp)
-    assert "--unattended" in pl["ProgramArguments"] and pl["KeepAlive"] is False
+    assert "--unattended" in pl["ProgramArguments"] and "--all-projects" in pl["ProgramArguments"] and pl["KeepAlive"] is False
     plistlib.dumps(pl)
     ok, why = daemon.unattended_allowed(None)
     assert not ok and "never been run" in why

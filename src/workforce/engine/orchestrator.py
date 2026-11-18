@@ -22,9 +22,10 @@ from workforce.engine.planning import approve_architecture
 from workforce.engine.pipeline import EngineContext, StepOutcome, TaskPipeline
 from workforce.engine.recovery import recover_project
 from workforce.engine.scheduler import plan_assignments, promote_ready
+from workforce.engine.shared import SharedRuntime
 from workforce.engine.state import ACTIVE, TaskState, transition
 from workforce.engine.testing import run_checked
-from workforce.logging import get_logger
+from workforce.logging import get_logger, reset_log_project, set_log_project
 from workforce.providers.base import ProviderAdapter
 from workforce.providers.registry import ProviderRegistry, mark_interrupted_executions
 
@@ -44,13 +45,28 @@ class RunSummary:
 
 
 class Orchestrator:
-    def __init__(self, app: App, adapters: dict[str, ProviderAdapter] | None = None, actor: str = "engine"):
+    def __init__(self, app: App, adapters: dict[str, ProviderAdapter] | None = None, actor: str = "engine",
+                 shared: SharedRuntime | None = None, project_name: str | None = None, install_signals: bool = True,
+                 follow_global_state: bool = False):
+        """One orchestrator drives the projects stored in one state database. In multi-project runs each
+        project has its own database and orchestrator; `shared` coordinates them (global provider limits,
+        central role state, cross-project developer capacity, global run state)."""
         self.app = app
         self.cfg = app.cfg
         self.db = app.db
-        self.registry = ProviderRegistry(self.cfg, self.db, adapters)
+        self.shared = shared
+        self.project_name = project_name
+        self.install_signals = install_signals
+        with self.db.session() as s:
+            repos = [Path(p.repo_path) for p in s.scalars(select(Project))]
+        # Agents may only start inside this database's projects: their worktrees or repositories.
+        self.registry = ProviderRegistry(self.cfg, self.db, adapters, shared=shared,
+                                         workspace_roots=[self.cfg.worktree_dir, *repos])
+        self.registry.guard_repos = repos
         self.agents = Agents(self.cfg, self.registry)
-        self.ctx = EngineContext(self.cfg, self.db, self.registry, self.agents)
+        self.ctx = EngineContext(self.cfg, self.db, self.registry, self.agents,
+                                 global_db=shared.state_db if (follow_global_state and shared
+                                                               and shared.state_db.path != self.db.path) else None)
         self.running: dict[int, asyncio.Task] = {}
         self._lock_fd = None
         self._manager_cooldown = 0.0
@@ -75,6 +91,19 @@ class Orchestrator:
     def _flag(self, key: str, default=None):
         with self.db.session() as s:
             return control.get_flag(s, key, default)
+
+    def _run_state(self) -> str:
+        """Effective run state: this project's flag combined with the engine-wide flag (multi-project runs)."""
+        state = self._flag("run_state", "running") or "running"
+        g = self.ctx.global_db
+        if g is not None:
+            with g.session() as s:
+                gs = control.get_flag(s, "run_state", "running") or "running"
+            if gs == "stopping" and state not in ("stopping", "stopped"):
+                return "stopping"
+            if gs == "paused" and state == "running":
+                return "paused"
+        return state
 
     def _set(self, key: str, value: str) -> None:
         with self.db.session() as s:
@@ -113,12 +142,13 @@ class Orchestrator:
     async def run(self, until_idle: bool = True, max_seconds: float | None = None) -> RunSummary:
         self._acquire_lock()
         loop = asyncio.get_running_loop()
-        stop_event = asyncio.Event()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                loop.add_signal_handler(sig, lambda: (self._set("run_state", "stopping"), stop_event.set()))
-            except (NotImplementedError, RuntimeError):
-                pass
+        token = set_log_project(self.project_name) if self.project_name else None
+        if self.install_signals:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, lambda: self._set("run_state", "stopping"))
+                except (NotImplementedError, RuntimeError):
+                    pass
         try:
             actions = self.recover()
             if actions:
@@ -131,7 +161,7 @@ class Orchestrator:
             while True:
                 with self.db.session() as s:
                     control.heartbeat(s)
-                state = self._flag("run_state", "running")
+                state = self._run_state()
                 if state in ("stopping", "stopped"):
                     reason = "stop requested"
                     break
@@ -156,13 +186,18 @@ class Orchestrator:
             if self.running:
                 await asyncio.gather(*self.running.values(), return_exceptions=True)
                 self.running.clear()
-            for sig in (signal.SIGTERM, signal.SIGINT):
-                try:
-                    loop.remove_signal_handler(sig)
-                except (NotImplementedError, RuntimeError):
-                    pass
+            if self.install_signals:
+                for sig in (signal.SIGTERM, signal.SIGINT):
+                    try:
+                        loop.remove_signal_handler(sig)
+                    except (NotImplementedError, RuntimeError):
+                        pass
+            if self.shared and self.project_name:
+                self.shared.withdraw(self.project_name)
             self._set("run_state", "stopped")
             self._release_lock()
+            if token is not None:
+                reset_log_project(token)
 
     async def _shutdown(self) -> None:
         """Graceful stop: pipelines stop at the next step boundary; cancel after the grace period."""
@@ -226,12 +261,13 @@ class Orchestrator:
                         continue
                     self._launch(t.id)
                     launched += 1
-            devs = [r for r in DEVELOPER_ROLES if self.registry.role_available(r)[0]]
+            devs, capacity = self._dev_capacity(p.id)
             if not devs:
                 continue
             suggestion = await self._manager_suggestion(p, devs)
+            devs, capacity = self._dev_capacity(p.id)  # re-check: other projects may have taken slots meanwhile
             with self.db.session() as s:
-                for a in plan_assignments(s, p.id, devs, self.cfg.limits.max_dev_concurrency, suggestion):
+                for a in plan_assignments(s, p.id, devs, capacity, suggestion):
                     t = s.scalars(select(Task).where(Task.project_id == p.id, Task.key == a.task_key)).one()
                     t.assigned_role = a.role.value
                     transition(s, t, TaskState.ASSIGNED, f"assigned to {a.role.value} ({a.reason})")
@@ -239,7 +275,23 @@ class Orchestrator:
                     s.flush()
                     self._launch(pending_launch)
                     launched += 1
+            self._dev_capacity(p.id)  # publish the new assignments to the other projects
         return launched
+
+    def _dev_capacity(self, project_id: int) -> tuple[list[Role], int]:
+        """Developers free for this project and its concurrency budget, accounting for other projects."""
+        devs = [r for r in DEVELOPER_ROLES if self.registry.role_available(r)[0]]
+        limit = self.cfg.limits.max_dev_concurrency
+        if not self.shared:
+            return devs, limit
+        key = self.project_name or str(self.db.path)
+        with self.db.session() as s:
+            active = s.scalars(select(Task).where(Task.project_id == project_id, Task.state.in_(
+                ["ASSIGNED", "IMPLEMENTING", "TESTING", "REVIEWING", "NEEDS_FIX"]))).all()
+            busy = {t.assigned_role for t in active if t.assigned_role}
+        self.shared.publish(key, busy, len(active))
+        elsewhere = self.shared.busy_elsewhere(key)
+        return [r for r in devs if r.value not in elsewhere], self.shared.capacity_for(key, limit)
 
     def _awaiting_integration_approval(self, s, t: Task) -> bool:
         if not self.cfg.require_integration_approval:
@@ -273,7 +325,7 @@ class Orchestrator:
                 tasks = s.scalars(select(Task).where(Task.project_id == p.id)).all()
                 devs = [r for r in DEVELOPER_ROLES if self.registry.role_available(r)[0]]
                 if devs and plan_assignments(s, p.id, devs, self.cfg.limits.max_dev_concurrency):
-                    return True
+                    return True  # assignable now, or as soon as another project frees capacity
                 for t in tasks:
                     if t.state in [x.value for x in ACTIVE] + ["NEEDS_FIX"]:
                         if t.state == "INTEGRATING" and self._awaiting_integration_approval(s, t):

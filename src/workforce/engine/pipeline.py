@@ -49,6 +49,8 @@ class EngineContext:
     integration_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # task_id -> monotonic time before which the task should not be retried
     backoff: dict[int, float] = field(default_factory=dict)
+    # engine-wide control database in multi-project runs (global pause/stop)
+    global_db: Database | None = None
 
     def git(self, project: Project) -> GitRepo:
         return GitRepo(project.repo_path, self.cfg.policy)
@@ -96,7 +98,13 @@ class TaskPipeline:
 
     def _run_state(self) -> str:
         with self.ctx.db.session() as s:
-            return control.get_flag(s, "run_state", "running") or "running"
+            state = control.get_flag(s, "run_state", "running") or "running"
+        if self.ctx.global_db is not None and state == "running":
+            with self.ctx.global_db.session() as s:
+                g = control.get_flag(s, "run_state", "running") or "running"
+            if g in ("paused", "stopping"):
+                return g
+        return state
 
     def _move(self, to: S, reason: str, **fields) -> None:
         with self.ctx.db.session() as s:

@@ -31,7 +31,7 @@ def plist_path() -> Path:
 def build_plist(cfg: WorkforceConfig, config_path: Path) -> dict:
     return {
         "Label": LABEL,
-        "ProgramArguments": [sys.executable, "-m", "workforce.cli", "run", "--until-idle", "--unattended",
+        "ProgramArguments": [sys.executable, "-m", "workforce.cli", "run", "--all-projects", "--until-idle", "--unattended",
                              "--config", str(config_path.resolve())],
         "WorkingDirectory": str(config_path.resolve().parent),
         "RunAtLoad": True,
