@@ -138,8 +138,9 @@ Acceptance criteria: {json.dumps(task['acceptance_criteria'])}
 {wrap_untrusted("architecture-decisions", json.dumps(decisions, indent=2))}
 {_reqs_block(reqs)}
 
-Write pytest tests ONLY under `{test_dir}/` (create the directory; name files test_*.py; add an empty conftest.py
-if needed so imports resolve from the repository root). Cover: positive behaviour, negative cases, boundary values,
+Write pytest tests ONLY under `{test_dir}/` (create the directory). Name every file
+`test_{test_dir.rsplit('/', 1)[-1]}_<topic>.py` so module names are unique across the whole repository, and do
+not add __init__.py files; imports resolve from the repository root. Cover: positive behaviour, negative cases, boundary values,
 API contract details (status codes, fields), security-relevant behaviour and error handling, as applicable.
 Put the requirement key(s) each test verifies in the test's docstring, e.g. \"\"\"Verifies FR-1.\"\"\".
 Tests must be deterministic and must not use the network. Report every test you wrote."""
