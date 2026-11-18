@@ -94,6 +94,8 @@ class LimitsConfig(BaseModel):
     task_wall_clock_s: int = 4 * 3600
     command_timeout_s: int = 900
     poll_interval_s: float = 2.0
+    provider_wait_s: float = 60.0
+    shutdown_grace_s: float = 60.0
 
 
 class PolicyConfig(BaseModel):

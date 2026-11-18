@@ -45,7 +45,7 @@ TRANSITIONS: dict[TaskState, set[TaskState]] = {
     S.PAUSED: {S.READY, S.BACKLOG, S.ASSIGNED, S.IMPLEMENTING, S.TESTING, S.REVIEWING, S.INTEGRATING, S.NEEDS_FIX,
                S.CANCELLED, S.BLOCKED},
     S.FAILED: {S.READY},
-    S.COMPLETED: set(),
+    S.COMPLETED: {S.BLOCKED},  # only via an explicit human rollback of an integrated task
     S.CANCELLED: set(),
 }
 

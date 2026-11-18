@@ -84,7 +84,8 @@ def plan_assignments(s: Session, project_id: int, available_devs: list[Role], ma
     entries are ignored and the deterministic order fills the remaining slots."""
     tasks = project_tasks(s, project_id)
     active = [t for t in tasks if t.state in ACTIVE or t.state == TaskState.NEEDS_FIX]
-    busy_roles = {Role(t.assigned_role) for t in active if t.assigned_role}
+    # A developer is free once their task has passed review (INTEGRATING is DevOps work).
+    busy_roles = {Role(t.assigned_role) for t in active if t.assigned_role and t.state != TaskState.INTEGRATING}
     free_roles = [r for r in available_devs if r not in busy_roles]
     slots = max(0, max_concurrency - len([t for t in active if t.state != TaskState.INTEGRATING]))
     ready = {t.key: t for t in tasks if t.state == TaskState.READY}

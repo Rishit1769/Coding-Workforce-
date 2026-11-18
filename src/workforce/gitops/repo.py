@@ -7,6 +7,7 @@ Destructive operations are restricted to engine-owned worktrees/branches
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -99,6 +100,10 @@ class GitRepo:
         path = Path(path).resolve()
         if path.exists():
             self.remove_worktree(path)
+        if path.exists():
+            # Engine-owned scratch directory left behind by an interrupted run.
+            shutil.rmtree(path)
+            self.git("worktree", "prune", check=False)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.git("worktree", "add", "--detach", str(path), ref)
         return path
@@ -125,12 +130,31 @@ class GitRepo:
 
     def working_changes(self, cwd: Path) -> list[str]:
         files = []
-        for line in self.out("status", "--porcelain", "--untracked-files=all", cwd=cwd).splitlines():
+        raw = self.git("status", "--porcelain", "--untracked-files=all", cwd=cwd).stdout
+        for line in raw.splitlines():
+            if len(line) < 4:
+                continue
             entry = line[3:]
             if " -> " in entry:
                 entry = entry.split(" -> ", 1)[1]
             files.append(entry.strip('"'))
         return files
+
+    def snapshot(self, wt: Path) -> dict[str, str]:
+        """Content hashes of every tracked/untracked (non-ignored) file in a worktree."""
+        import hashlib
+
+        files = self.git("ls-files", "--cached", "--others", "--exclude-standard", cwd=wt).stdout.splitlines()
+        snap = {}
+        for f in set(files):
+            p = wt / f
+            if p.is_file():
+                snap[f] = hashlib.sha256(p.read_bytes()).hexdigest()
+        return snap
+
+    def changed_since(self, wt: Path, snap: dict[str, str]) -> list[str]:
+        after = self.snapshot(wt)
+        return sorted(f for f in snap.keys() | after.keys() if snap.get(f) != after.get(f))
 
     def diff(self, base: str, head: str = "HEAD", cwd: Path | None = None, max_chars: int = 60000) -> str:
         d = self.out("diff", "--stat", "--patch", f"{base}...{head}", cwd=cwd)
