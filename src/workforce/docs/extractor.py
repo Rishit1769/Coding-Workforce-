@@ -42,7 +42,10 @@ class Candidate:
 
 
 def normalize(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[*_`]", "", text)).strip()
+    """Strip Markdown emphasis/code markers but keep identifiers such as snake_case names intact."""
+    text = re.sub(r"[*`]", "", text)
+    text = re.sub(r"(?<![A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])", r"\1", text)  # _emphasis_ only
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def content_hash(text: str) -> str:

@@ -123,3 +123,9 @@ def test_ingest_all_formats_and_issues(wf, tmp_path):
         rows = build_matrix(s, p.id)
         assert any(r["requirement"] == "FR-1" and r["final_status"] == "uncovered" for r in rows)
         assert "| FR-1 |" in matrix_markdown(rows)
+
+
+def test_normalize_keeps_identifiers():
+    from workforce.docs.extractor import normalize
+    assert normalize("`word_count(text, include_spaces=True)` is _important_") == \
+        "word_count(text, include_spaces=True) is important"
