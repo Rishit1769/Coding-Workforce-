@@ -146,6 +146,14 @@ class ProviderRegistry:
         assert res is not None
         if res.error_kind in ROLE_DISABLING:
             self.set_role_status(role, False, f"{res.error_kind}: {res.error[:500]}")
+            from workforce.engine.control import request_approval
+
+            with self.db.session() as s:
+                request_approval(s, "role_unavailable",
+                                 f"Role {role.value} ({rc.provider}/{rc.model}) is unavailable: {res.error_kind}. "
+                                 "Fix authentication/entitlement, then run `workforce models verify` and retry "
+                                 "blocked tasks. Approving only acknowledges this notice.",
+                                 {"role": role.value, "error": redact(res.error)[:500]}, project_id=project_id)
         return res
 
     async def _run_once(self, adapter, provider, req, role, task_id, project_id) -> ExecutionResult:

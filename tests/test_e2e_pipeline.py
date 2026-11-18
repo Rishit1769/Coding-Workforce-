@@ -205,6 +205,16 @@ async def test_unavailable_tester_blocks_instead_of_substituting(tmp_path):
     assert "no actionable work" in summary.reason
     ok, why = orch.registry.role_available(Role.TESTER)
     assert not ok and "model_unavailable" in why
+    with app.db.session() as s:
+        assert s.scalars(select(Approval).where(Approval.kind == "role_unavailable")).first() is not None
+
+
+async def test_task_wall_clock_budget(tmp_path):
+    def mod(cfg):
+        cfg.limits.task_wall_clock_s = 0
+    app, orch, repo, adapter, _ = await setup(tmp_path, None, mod)
+    await orch.run(until_idle=True, max_seconds=30)
+    assert all(t.state == "BLOCKED" and "wall-clock" in t.blocked_reason for t in tasks(app).values())
 
 
 async def test_bounded_correction_loop_blocks(tmp_path):

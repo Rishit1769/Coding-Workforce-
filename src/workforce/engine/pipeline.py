@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from datetime import UTC, datetime
 import json
 import time
 from dataclasses import dataclass, field
@@ -136,6 +137,11 @@ class TaskPipeline:
                 return StepOutcome.STOP
             if self._run_state() in ("paused", "stopping", "stopped"):
                 return StepOutcome.WAIT
+            if t.started_at and t.state in handlers:
+                started = t.started_at if t.started_at.tzinfo else t.started_at.replace(tzinfo=UTC)
+                if (datetime.now(UTC) - started).total_seconds() > self.ctx.cfg.limits.task_wall_clock_s:
+                    self._move(S.BLOCKED, f"task wall-clock budget ({self.ctx.cfg.limits.task_wall_clock_s}s) exceeded")
+                    return StepOutcome.STOP
             handler = handlers.get(S(t.state))
             if handler is None:
                 return StepOutcome.STOP
