@@ -4,9 +4,15 @@ import { useState } from "react";
 import { Agent, Approval, Task, postJSON, usePoll } from "@/lib/api";
 import { Dot, Empty, ErrorNote, Section, STATE_COLORS, STATE_ORDER, StateBadge, ago } from "./ui";
 
+/** Append the selected project to an API path (each project has its own isolated state). */
+export function withProject(path: string, project: number | null): string {
+  if (project === null) return path;
+  return `${path}${path.includes("?") ? "&" : "?"}project=${project}`;
+}
+
 /* ------------------------------------------------------------------ agents */
-export function AgentsView() {
-  const { data, error } = usePoll<Agent[]>("/api/agents");
+export function AgentsView({ project }: { project: number | null }) {
+  const { data, error } = usePoll<Agent[]>(withProject("/api/agents", project));
   return (
     <Section title="Agents">
       <ErrorNote error={error} />
@@ -66,7 +72,7 @@ type TaskDetail = {
 };
 
 export function TasksView({ project }: { project: number | null }) {
-  const { data, error, refresh } = usePoll<Task[]>(project ? `/api/tasks?project=${project}` : "/api/tasks");
+  const { data, error, refresh } = usePoll<Task[]>(withProject("/api/tasks", project));
   const [selected, setSelected] = useState<number | null>(null);
   const tasks = data ?? [];
   const counts: Record<string, number> = {};
@@ -116,7 +122,7 @@ export function TasksView({ project }: { project: number | null }) {
                     <td className="mono text-xs">{t.owned_paths.join(", ")}</td>
                     <td className="text-xs muted">{ago(t.updated_at)}</td>
                     <td onClick={(e) => e.stopPropagation()}>
-                      <TaskActions task={t} onDone={refresh} />
+                      <TaskActions task={t} project={project} onDone={refresh} />
                     </td>
                   </tr>
                 ))}
@@ -125,17 +131,17 @@ export function TasksView({ project }: { project: number | null }) {
           </div>
         )}
       </Section>
-      {selected && <TaskDetailPanel id={selected} onClose={() => setSelected(null)} />}
+      {selected && <TaskDetailPanel id={selected} project={project} onClose={() => setSelected(null)} />}
     </div>
   );
 }
 
-function TaskActions({ task, onDone }: { task: Task; onDone: () => void }) {
+function TaskActions({ task, project, onDone }: { task: Task; project: number | null; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const act = async (action: string) => {
     setBusy(true);
     try {
-      await postJSON(`/api/tasks/${task.id}/${action}`);
+      await postJSON(withProject(`/api/tasks/${task.id}/${action}`, project));
     } catch (e) {
       alert(String(e));
     } finally {
@@ -157,8 +163,8 @@ function TaskActions({ task, onDone }: { task: Task; onDone: () => void }) {
   );
 }
 
-function TaskDetailPanel({ id, onClose }: { id: number; onClose: () => void }) {
-  const { data, error } = usePoll<TaskDetail>(`/api/tasks/${id}`);
+function TaskDetailPanel({ id, project, onClose }: { id: number; project: number | null; onClose: () => void }) {
+  const { data, error } = usePoll<TaskDetail>(withProject(`/api/tasks/${id}`, project));
   return (
     <Section title={data ? `${data.key} · ${data.title}` : "Task"} right={<button className="btn" onClick={onClose}>Close</button>}>
       <ErrorNote error={error} />
@@ -228,13 +234,13 @@ function TaskDetailPanel({ id, onClose }: { id: number; onClose: () => void }) {
 }
 
 /* --------------------------------------------------------------- approvals */
-export function ApprovalsView() {
+export function ApprovalsView({ project }: { project: number | null }) {
   const [showAll, setShowAll] = useState(false);
-  const { data, error, refresh } = usePoll<Approval[]>(`/api/approvals?status=${showAll ? "all" : "pending"}`);
+  const { data, error, refresh } = usePoll<Approval[]>(withProject(`/api/approvals?status=${showAll ? "all" : "pending"}`, project));
   const [comment, setComment] = useState<Record<number, string>>({});
   const decide = async (id: number, approve: boolean) => {
     try {
-      await postJSON(`/api/approvals/${id}/decide`, { approve, comment: comment[id] || null });
+      await postJSON(withProject(`/api/approvals/${id}/decide`, project), { approve, comment: comment[id] || null });
     } catch (e) {
       alert(String(e));
     }
@@ -337,10 +343,10 @@ type Execution = { id: number; task_id: number | null; role: string; purpose: st
 type Errors = { providers: { provider: string; breaker: string; consecutive_failures: number; open_until: string | null; last_error: string }[]; failures: { id: number; role: string; provider: string; status: string; error_kind: string; error: string; at: string }[] };
 type Usage = { note: string; rows: { role: string; provider: string; model: string; calls: number; ok: number; failed: number; input_tokens: number; output_tokens: number; seconds: number; est_cost_usd: number }[] };
 
-export function ExecutionsView() {
-  const ex = usePoll<Execution[]>("/api/executions?limit=100");
-  const er = usePoll<Errors>("/api/errors", 5000);
-  const us = usePoll<Usage>("/api/usage", 10000);
+export function ExecutionsView({ project }: { project: number | null }) {
+  const ex = usePoll<Execution[]>(withProject("/api/executions?limit=100", project));
+  const er = usePoll<Errors>(withProject("/api/errors", project), 5000);
+  const us = usePoll<Usage>(withProject("/api/usage", project), 10000);
   return (
     <div className="space-y-4">
       <Section title="Provider health & errors">
@@ -376,8 +382,8 @@ export function ExecutionsView() {
 /* -------------------------------------------------------------------- logs */
 type Logs = { audit: { ts: string; actor: string; action: string; task_id: number | null; details: Record<string, unknown> }[]; system: Record<string, unknown>[] };
 
-export function LogsView() {
-  const { data, error } = usePoll<Logs>("/api/logs?limit=200", 5000);
+export function LogsView({ project }: { project: number | null }) {
+  const { data, error } = usePoll<Logs>(withProject("/api/logs?limit=200", project), 5000);
   return (
     <div className="grid gap-4 xl:grid-cols-2">
       <Section title="Audit log">

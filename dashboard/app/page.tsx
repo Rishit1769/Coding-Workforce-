@@ -2,16 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { Overview, postJSON, usePoll } from "@/lib/api";
-import { AgentsView, ApprovalsView, ExecutionsView, GitView, LogsView, TasksView, TraceView } from "@/components/views";
+import { AgentsView, ApprovalsView, ExecutionsView, GitView, LogsView, TasksView, TraceView, withProject } from "@/components/views";
 import { Dot, ErrorNote, ago } from "@/components/ui";
 
 const TABS = ["Overview", "Tasks", "Approvals", "Traceability", "Git", "Executions", "Logs"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function Dashboard() {
-  const { data: ov, error, refresh } = usePoll<Overview>("/api/overview", 2500);
   const [tab, setTab] = useState<Tab>("Overview");
   const [project, setProject] = useState<number | null>(null);
+  const { data: ov, error, refresh } = usePoll<Overview>(withProject("/api/overview", project), 2500);
 
   useEffect(() => {
     if (project === null && ov?.projects.length) setProject(ov.projects[ov.projects.length - 1].id);
@@ -20,7 +20,7 @@ export default function Dashboard() {
   const control = async (action: "pause" | "resume" | "stop") => {
     if (action === "stop" && !confirm("Stop the engine gracefully?")) return;
     try {
-      await postJSON(`/api/control/${action}`);
+      await postJSON(withProject(`/api/control/${action}`, project));
     } catch (e) {
       alert(String(e));
     }
@@ -56,7 +56,7 @@ export default function Dashboard() {
       <main className="space-y-4">
         {tab === "Overview" && (
           <>
-            <AgentsView />
+            <AgentsView project={project} />
             <TasksView project={project} />
             {ov && (
               <p className="text-xs muted">
@@ -66,11 +66,11 @@ export default function Dashboard() {
           </>
         )}
         {tab === "Tasks" && <TasksView project={project} />}
-        {tab === "Approvals" && <ApprovalsView />}
+        {tab === "Approvals" && <ApprovalsView project={project} />}
         {tab === "Traceability" && <TraceView project={project} />}
         {tab === "Git" && <GitView project={project} />}
-        {tab === "Executions" && <ExecutionsView />}
-        {tab === "Logs" && <LogsView />}
+        {tab === "Executions" && <ExecutionsView project={project} />}
+        {tab === "Logs" && <LogsView project={project} />}
       </main>
     </div>
   );

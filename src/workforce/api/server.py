@@ -1,6 +1,11 @@
 """Local control API (FastAPI). Every response is derived from the live state
 database or git; nothing is simulated. Bound to loopback only.
 
+Multi-project mode (`registry` given, used by `workforce serve`): the `project`
+query parameter is the central registry id and every project-scoped request is
+answered from that project's own state database. Without a registry the API
+serves a single state database and `project` is the project id inside it.
+
 CSRF/DNS-rebinding defences: Host header must be loopback; state-changing
 requests require JSON content type, the X-Workforce-Client header (forces a
 CORS preflight that this server never approves) and, if present, a loopback
@@ -10,6 +15,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -19,9 +25,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from workforce.app import App
-from workforce.config import DEVELOPER_ROLES, Role
+from workforce.config import DEVELOPER_ROLES
 from workforce.db import models as m
 from workforce.docs.traceability import build_matrix
 from workforce.engine import control
@@ -46,8 +53,17 @@ class Decision(BaseModel):
     comment: str | None = None
 
 
-def create_api(wf: App, static_dir: Path | None = DASHBOARD_DIR) -> FastAPI:
-    api = FastAPI(title="Coding Workforce control API", version="0.1.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
+@dataclass
+class Scope:
+    app: App
+    s: Session
+    pid: int | None  # project id inside app.db (None: no project selected)
+    repo: Path | None
+    name: str | None
+
+
+def create_api(wf: App, static_dir: Path | None = DASHBOARD_DIR, registry=None) -> FastAPI:
+    api = FastAPI(title="Coding Workforce control API", version="0.2.0", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
     @api.middleware("http")
     async def guard(request: Request, call_next):
@@ -68,36 +84,82 @@ def create_api(wf: App, static_dir: Path | None = DASHBOARD_DIR) -> FastAPI:
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
-    def session():
+    def _ctx(project: int):
+        entry = next((e for e in registry.entries() if e.id == project), None)
+        if entry is None:
+            raise HTTPException(404, f"unknown project {project}")
+        return registry.context(entry)
+
+    def scoped(project: int | None = None):
+        """Resolve the state database a request is about."""
+        if registry is not None and project is not None:
+            c = _ctx(project)
+            with c.app.db.session() as s:
+                yield Scope(c.app, s, c.project_id, c.repo, c.name)
+            return
+        with wf.db.session() as s:
+            p = s.get(m.Project, project) if project is not None else None
+            if project is not None and p is None:
+                raise HTTPException(404, f"unknown project {project}")
+            yield Scope(wf, s, project, Path(p.repo_path) if p else None, p.name if p else None)
+
+    def central():
         with wf.db.session() as s:
             yield s
 
+    def _alive(s: Session) -> tuple[str, str | None, bool]:
+        hb = control.get_flag(s, "heartbeat")
+        state = control.get_flag(s, "run_state", "stopped")
+        alive = bool(hb) and state != "stopped" and (
+            datetime.now(UTC) - datetime.fromisoformat(hb)).total_seconds() < max(30, wf.cfg.limits.poll_interval_s * 10)
+        return state, hb, alive
+
+    def _projects() -> list[dict]:
+        if registry is None:
+            with wf.db.session() as s:
+                return [{"id": p.id, "name": p.name, "status": p.status, "repo": p.repo_path}
+                        for p in s.scalars(select(m.Project))]
+        out = []
+        for c in registry.contexts():
+            with c.app.db.session() as s:
+                p = s.get(m.Project, c.project_id)
+                out.append({"id": c.entry_id, "name": c.name, "status": p.status, "repo": str(c.repo),
+                            "state_dir": str(c.home)})
+        return out
+
     # ---- read endpoints ------------------------------------------------
     @api.get("/api/overview")
-    def overview(s=Depends(session)):
-        hb = control.get_flag(s, "heartbeat")
-        alive = False
-        if hb and control.get_flag(s, "run_state", "stopped") != "stopped":
-            alive = (datetime.now(UTC) - datetime.fromisoformat(hb)).total_seconds() < max(30, wf.cfg.limits.poll_interval_s * 10)
-        counts = dict(s.execute(select(m.Task.state, func.count()).group_by(m.Task.state)).all())
-        safety = control.get_flag(s, "safety_check")
+    def overview(project: int | None = None, sc: Scope = Depends(scoped), cs: Session = Depends(central)):
+        state, hb, alive = _alive(sc.s if sc.pid is not None else cs)
+        if registry is not None and sc.pid is not None:
+            eng_state, eng_hb, eng_alive = _alive(cs)
+            if eng_alive and not alive:  # project driven by the multi-project daemon
+                state, hb, alive = eng_state, eng_hb, eng_alive
+        q = select(m.Task.state, func.count()).group_by(m.Task.state)
+        if sc.pid is not None:
+            q = q.where(m.Task.project_id == sc.pid)
+        counts = dict(sc.s.execute(q).all())
+        safety = control.get_flag(cs, "safety_check")
+        pending_q = select(func.count()).select_from(m.Approval).where(m.Approval.status == "pending")
         return {
-            "run_state": control.get_flag(s, "run_state", "stopped"), "heartbeat": hb, "engine_alive": alive,
-            "mode": wf.cfg.mode, "task_counts": counts, "total_tasks": sum(counts.values()),
-            "pending_approvals": s.scalar(select(func.count()).select_from(m.Approval).where(m.Approval.status == "pending")),
+            "run_state": state, "heartbeat": hb, "engine_alive": alive,
+            "mode": sc.app.cfg.mode, "task_counts": counts, "total_tasks": sum(counts.values()),
+            "pending_approvals": sc.s.scalar(pending_q),
             "safety_check": json.loads(safety) if safety else None,
-            "projects": [{"id": p.id, "name": p.name, "status": p.status} for p in s.scalars(select(m.Project))],
+            "projects": _projects(), "multi_project": registry is not None,
         }
 
     @api.get("/api/agents")
-    def agents(s=Depends(session)):
-        status = {r.role: r for r in s.scalars(select(m.RoleStatus))}
-        breakers = {b.provider: b for b in s.scalars(select(m.ProviderState))}
+    def agents(project: int | None = None, sc: Scope = Depends(scoped), cs: Session = Depends(central)):
+        status = {r.role: r for r in cs.scalars(select(m.RoleStatus))}
+        breakers = {b.provider: b for b in cs.scalars(select(m.ProviderState))}
+        s = sc.s
         out = []
         for role, rc in wf.cfg.roles.items():
             st = status.get(role.value)
             br = breakers.get(rc.provider)
-            last = s.scalars(select(m.Execution).where(m.Execution.role == role.value).order_by(m.Execution.id.desc())).first()
+            ex_q = select(m.Execution).where(m.Execution.role == role.value)
+            last = s.scalars(ex_q.order_by(m.Execution.id.desc())).first()
             current = None
             if role in DEVELOPER_ROLES:
                 t = s.scalars(select(m.Task).where(m.Task.assigned_role == role.value,
@@ -121,20 +183,21 @@ def create_api(wf: App, static_dir: Path | None = DASHBOARD_DIR) -> FastAPI:
         return out
 
     @api.get("/api/tasks")
-    def tasks(project: int | None = None, s=Depends(session)):
+    def tasks(project: int | None = None, sc: Scope = Depends(scoped)):
         q = select(m.Task).order_by(m.Task.id)
-        if project:
-            q = q.where(m.Task.project_id == project)
+        if sc.pid is not None:
+            q = q.where(m.Task.project_id == sc.pid)
         return [{"id": t.id, "project_id": t.project_id, "key": t.key, "title": t.title, "state": t.state,
                  "assigned_role": t.assigned_role, "preferred_role": t.preferred_role, "attempts": t.attempts,
                  "depends_on": t.depends_on, "requirement_keys": t.requirement_keys, "owned_paths": t.owned_paths,
                  "branch": t.branch, "head_commit": t.head_commit, "integrated_commit": t.integrated_commit,
-                 "blocked_reason": t.blocked_reason, "updated_at": _iso(t.updated_at)} for t in s.scalars(q)]
+                 "blocked_reason": t.blocked_reason, "updated_at": _iso(t.updated_at)} for t in sc.s.scalars(q)]
 
     @api.get("/api/tasks/{task_id}")
-    def task_detail(task_id: int, s=Depends(session)):
+    def task_detail(task_id: int, project: int | None = None, sc: Scope = Depends(scoped)):
+        s = sc.s
         t = s.get(m.Task, task_id)
-        if t is None:
+        if t is None or (sc.pid is not None and t.project_id != sc.pid):
             raise HTTPException(404)
         return redact_obj({
             "id": t.id, "key": t.key, "title": t.title, "description": t.description, "state": t.state,
@@ -153,82 +216,86 @@ def create_api(wf: App, static_dir: Path | None = DASHBOARD_DIR) -> FastAPI:
         })
 
     @api.get("/api/executions")
-    def executions(limit: int = 100, s=Depends(session)):
-        rows = s.scalars(select(m.Execution).order_by(m.Execution.id.desc()).limit(min(limit, 500)))
+    def executions(limit: int = 100, project: int | None = None, sc: Scope = Depends(scoped)):
+        rows = sc.s.scalars(select(m.Execution).order_by(m.Execution.id.desc()).limit(min(limit, 500)))
         return [{"id": e.id, "task_id": e.task_id, "role": e.role, "purpose": e.purpose, "provider": e.provider,
                  "model": e.model, "status": e.status, "error_kind": e.error_kind,
                  "error": redact(e.error or "")[:500], "duration_s": e.duration_s, "usage": e.usage,
                  "started_at": _iso(e.started_at)} for e in rows]
 
     @api.get("/api/errors")
-    def errors(s=Depends(session)):
-        failed = s.scalars(select(m.Execution).where(m.Execution.status.in_(["failed", "timeout", "interrupted"]))
-                           .order_by(m.Execution.id.desc()).limit(100))
+    def errors(project: int | None = None, sc: Scope = Depends(scoped), cs: Session = Depends(central)):
+        failed = sc.s.scalars(select(m.Execution).where(m.Execution.status.in_(["failed", "timeout", "interrupted"]))
+                              .order_by(m.Execution.id.desc()).limit(100))
         return {
             "providers": [{"provider": p.provider, "breaker": p.breaker, "consecutive_failures": p.consecutive_failures,
                            "open_until": _iso(p.open_until), "last_error": redact(p.last_error or "")}
-                          for p in s.scalars(select(m.ProviderState))],
+                          for p in cs.scalars(select(m.ProviderState))],
             "failures": [{"id": e.id, "role": e.role, "provider": e.provider, "status": e.status,
                           "error_kind": e.error_kind, "error": redact(e.error or "")[:400],
                           "at": _iso(e.started_at)} for e in failed],
         }
 
     @api.get("/api/usage")
-    def usage(project: int | None = None, s=Depends(session)):
+    def usage(project: int | None = None, sc: Scope = Depends(scoped)):
         return {"note": "Token counts are as reported by each CLI. Costs are list-price estimates reported by the CLI, "
                         "not subscription charges; subscription quotas are not visible to the workforce.",
-                "rows": usage_summary(s, project)}
+                "rows": usage_summary(sc.s, sc.pid)}
 
     @api.get("/api/approvals")
-    def approvals(status: str | None = "pending", s=Depends(session)):
+    def approvals(status: str | None = "pending", project: int | None = None, sc: Scope = Depends(scoped)):
         q = select(m.Approval).order_by(m.Approval.id.desc())
         if status and status != "all":
             q = q.where(m.Approval.status == status)
         return [{"id": a.id, "kind": a.kind, "subject": a.subject, "status": a.status, "project_id": a.project_id,
                  "task_id": a.task_id, "payload": redact_obj(a.payload), "created_at": _iso(a.created_at),
-                 "decided_by": a.decided_by, "comment": a.comment} for a in s.scalars(q.limit(200))]
+                 "decided_by": a.decided_by, "comment": a.comment} for a in sc.s.scalars(q.limit(200))]
+
+    def _need_project(sc: Scope) -> int:
+        if sc.pid is None:
+            raise HTTPException(400, "project query parameter required")
+        return sc.pid
 
     @api.get("/api/traceability")
-    def traceability(project: int, s=Depends(session)):
-        return build_matrix(s, project)
+    def traceability(project: int, sc: Scope = Depends(scoped)):
+        return build_matrix(sc.s, _need_project(sc))
 
     @api.get("/api/requirements")
-    def requirements(project: int, s=Depends(session)):
+    def requirements(project: int, sc: Scope = Depends(scoped)):
+        pid = _need_project(sc)
         return {
             "requirements": [{"key": r.key, "text": r.text, "status": r.status, "category": r.category,
                               "priority": r.priority, "acceptance_criteria": r.acceptance_criteria}
-                             for r in s.scalars(select(m.Requirement).where(m.Requirement.project_id == project))],
+                             for r in sc.s.scalars(select(m.Requirement).where(m.Requirement.project_id == pid))],
             "issues": [{"id": i.id, "kind": i.kind, "severity": i.severity, "status": i.status,
                         "requirement_keys": i.requirement_keys, "description": i.description}
-                       for i in s.scalars(select(m.Issue).where(m.Issue.project_id == project))],
+                       for i in sc.s.scalars(select(m.Issue).where(m.Issue.project_id == pid))],
         }
 
     @api.get("/api/git")
-    def git_state(project: int, s=Depends(session)):
+    def git_state(project: int, sc: Scope = Depends(scoped)):
         from workforce.gitops.repo import GitRepo
 
-        p = s.get(m.Project, project)
-        if p is None:
-            raise HTTPException(404)
-        g = GitRepo(p.repo_path, wf.cfg.policy)
-        prefix = f"refs/heads/wf/{p.name}/"
+        _need_project(sc)
+        g = GitRepo(sc.repo, sc.app.cfg.policy)
+        prefix = f"refs/heads/wf/{sc.name}/"
         branches = []
         for line in g.out("for-each-ref", "--format=%(refname:short)\x1f%(objectname)\x1f%(committerdate:iso-strict)",
                           prefix).splitlines():
             name, sha, date = line.split("\x1f")
             branches.append({"name": name, "sha": sha, "date": date})
-        integ = f"wf/{p.name}/integration"
-        return {"branches": branches, "integration_branch": integ, "target_branch": wf.cfg.git.target_branch,
+        integ = f"wf/{sc.name}/integration"
+        return {"branches": branches, "integration_branch": integ, "target_branch": sc.app.cfg.git.target_branch,
                 "commits": g.log(integ, 40) if g.branch_exists(integ) else [],
-                "push_authorized": wf.cfg.git.push_authorized}
+                "push_authorized": sc.app.cfg.git.push_authorized}
 
     @api.get("/api/logs")
-    def logs(limit: int = 200, s=Depends(session)):
+    def logs(limit: int = 200, project: int | None = None, sc: Scope = Depends(scoped)):
         audit = [{"ts": _iso(a.ts), "actor": a.actor, "action": a.action, "task_id": a.task_id,
                   "details": redact_obj(a.details)}
-                 for a in s.scalars(select(m.AuditLog).order_by(m.AuditLog.id.desc()).limit(min(limit, 1000)))]
+                 for a in sc.s.scalars(select(m.AuditLog).order_by(m.AuditLog.id.desc()).limit(min(limit, 1000)))]
         system = []
-        f = wf.cfg.log_dir / "workforce.jsonl"
+        f = sc.app.cfg.log_dir / "workforce.jsonl"
         if f.exists():
             with f.open() as fh:
                 for line in deque(fh, maxlen=min(limit, 1000)):
@@ -240,27 +307,29 @@ def create_api(wf: App, static_dir: Path | None = DASHBOARD_DIR) -> FastAPI:
 
     # ---- control endpoints -------------------------------------------
     @api.post("/api/control/{action}")
-    def control_action(action: str, body: dict | None = None, s=Depends(session)):
+    def control_action(action: str, project: int | None = None, sc: Scope = Depends(scoped)):
         mapping = {"pause": "paused", "resume": "running", "stop": "stopping"}
         if action not in mapping:
             raise HTTPException(400, "action must be pause, resume or stop")
-        control.request_run_state(s, mapping[action], "human(dashboard)")
-        return {"run_state": mapping[action]}
+        control.request_run_state(sc.s, mapping[action], "human(dashboard)")
+        return {"run_state": mapping[action], "scope": sc.name or "engine"}
 
     @api.post("/api/approvals/{approval_id}/decide")
-    def decide(approval_id: int, d: Decision):
+    def decide(approval_id: int, d: Decision, project: int | None = None):
         from workforce.engine.orchestrator import approve
 
+        target = _ctx(project).app if registry is not None and project is not None else wf
         try:
-            a = approve(wf, approval_id, d.approve, "human(dashboard)", d.comment)
+            a = approve(target, approval_id, d.approve, "human(dashboard)", d.comment)
         except (KeyError, ValueError) as e:
             raise HTTPException(409, str(e))
         return {"id": a.id, "status": a.status}
 
     @api.post("/api/tasks/{task_id}/{action}")
-    def task_action(task_id: int, action: str, body: dict | None = None, s=Depends(session)):
+    def task_action(task_id: int, action: str, project: int | None = None, sc: Scope = Depends(scoped)):
+        s = sc.s
         t = s.get(m.Task, task_id)
-        if t is None:
+        if t is None or (sc.pid is not None and t.project_id != sc.pid):
             raise HTTPException(404)
         if action == "retry":
             if t.state not in ("BLOCKED", "FAILED"):
@@ -296,10 +365,10 @@ def create_api(wf: App, static_dir: Path | None = DASHBOARD_DIR) -> FastAPI:
     return api
 
 
-def serve(wf: App, host: str | None = None, port: int | None = None) -> None:
+def serve(wf: App, host: str | None = None, port: int | None = None, registry=None) -> None:
     import uvicorn
 
     host = host or wf.cfg.dashboard.host
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("the control API may only bind to loopback")
-    uvicorn.run(create_api(wf), host=host, port=port or wf.cfg.dashboard.port, log_level="warning")
+    uvicorn.run(create_api(wf, registry=registry), host=host, port=port or wf.cfg.dashboard.port, log_level="warning")

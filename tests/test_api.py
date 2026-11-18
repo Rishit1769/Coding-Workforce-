@@ -29,7 +29,7 @@ async def test_api_reflects_real_state_and_controls(tmp_path):
     assert c.get("/api/logs").json()["audit"]
     assert c.get("/api/usage").json()["rows"]
     # controls
-    assert c.post("/api/control/pause", json={}, headers=H).json() == {"run_state": "paused"}
+    assert c.post("/api/control/pause", json={}, headers=H).json()["run_state"] == "paused"
     r = c.post(f"/api/tasks/{blocked['id']}/retry", json={}, headers=H)
     assert r.status_code == 200 and tasks(app)["T-001"].state == "READY"
     appr = c.get("/api/approvals").json()
