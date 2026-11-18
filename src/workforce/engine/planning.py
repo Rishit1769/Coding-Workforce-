@@ -93,10 +93,12 @@ async def run_architecture(db: Database, cfg: WorkforceConfig, agents: Agents, p
                                                Task.state.notin_(["BACKLOG", "READY", "CANCELLED"]))).first()
         if started:
             raise PlanningError("tasks have already started; re-planning requires cancelling them first")
-        p.status = "architecting"
     reqs = approved_requirements(db, project_id)
     if not reqs:
+        # Checked before any state change or agent call, so a refused plan leaves the project untouched.
         raise PlanningError("no approved requirements; approve requirements before planning")
+    with db.session() as s:
+        s.get(Project, project_id).status = "architecting"
     git = GitRepo(repo, cfg.policy)
     summary = repo_summary(repo, git)
     if agents.reg.role_available(Role.WORKER)[0]:

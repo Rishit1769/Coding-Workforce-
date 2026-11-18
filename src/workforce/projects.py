@@ -12,7 +12,8 @@ their state stays in the central database exactly as before.
 Active project resolution order:
     explicit selector (command argument) > `workforce --project PATH` / $WORKFORCE_PROJECT
     > nearest `.workforce.yaml` above the current directory > a registered repository containing
-    the current directory > `workforce project use` > the only registered project.
+    the current directory > `workforce project use` > the default project (`workforce project default`,
+    otherwise a registered project named "yantra") > the only registered project.
 """
 
 from __future__ import annotations
@@ -35,6 +36,9 @@ from workforce.logging import register_project_logs
 MARKER = ".workforce.yaml"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 CURRENT_FLAG = "current_project"
+DEFAULT_FLAG = "default_project"
+# Fallback used by `force` (and every project command) when nothing else selects a project.
+BUILTIN_DEFAULT_PROJECT = "yantra"
 
 
 class ProjectError(Exception):
@@ -72,6 +76,7 @@ class ProjectContext:
     app: App
     project_id: int  # id of the project row inside app.db
     legacy: bool
+    source: str = "explicit"  # how the project was selected (for user-facing messages)
 
     @property
     def isolated(self) -> bool:
@@ -284,25 +289,47 @@ class ProjectRegistry:
             control.audit(s, "human", "project.use", {"name": e.name})
         return self.context(e)
 
+    def default(self) -> str | None:
+        """The fallback project: the configured default, else a registered project named "yantra"."""
+        with self.central.db.session() as s:
+            configured = control.get_flag(s, DEFAULT_FLAG) or None
+        names = {e.name for e in self.entries()}
+        if configured and configured in names:
+            return configured
+        return BUILTIN_DEFAULT_PROJECT if BUILTIN_DEFAULT_PROJECT in names else None
+
+    def set_default(self, selector: str | None) -> str | None:
+        name = self.entry(selector).name if selector else ""
+        with self.central.db.session() as s:
+            control.set_flag(s, DEFAULT_FLAG, name)
+            control.audit(s, "human", "project.default", {"name": name})
+        return name or None
+
     def resolve(self, selector: str | Path | None = None, cwd: Path | None = None) -> ProjectContext:
-        sel = selector or self.global_selector
-        if sel:
-            return self.context(self.entry(sel))
+        def found(entry: Project, source: str) -> ProjectContext:
+            ctx = self.context(entry)
+            ctx.source = source
+            return ctx
+
+        if selector:
+            return found(self.entry(selector), "argument")
+        if self.global_selector:
+            return found(self.entry(self.global_selector), "--project")
         here = (cwd or Path.cwd()).resolve()
         marker = find_marker(here)
         if marker:
-            return self.context(self.entry(str(marker.parent)))
+            return found(self.entry(str(marker.parent)), f"found {marker}")
         inside = [e for e in self.entries() if here == Path(e.repo_path) or here.is_relative_to(Path(e.repo_path))]
         if inside:  # registered repository without a marker (e.g. projects created before markers existed)
-            return self.context(max(inside, key=lambda e: len(e.repo_path)))
-        cur = self.current()
-        if cur:
-            e = self._by_name(cur)
+            return found(max(inside, key=lambda e: len(e.repo_path)), "current directory is inside it")
+        for name, source in ((self.current(), "current project (`project use`)"),
+                             (self.default(), "default project")):
+            e = self._by_name(name) if name else None
             if e is not None:
-                return self.context(e)
+                return found(e, source)
         entries = self.entries()
         if len(entries) == 1:
-            return self.context(entries[0])
+            return found(entries[0], "only registered project")
         if not entries:
             raise ProjectError("no projects registered; run `workforce project register /absolute/path/to/repo`")
         raise ProjectError("no active project: run inside a registered repository, pass `--project /abs/path`, or "

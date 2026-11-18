@@ -36,6 +36,23 @@ class EngineLocked(Exception):
     pass
 
 
+def lock_holder(path: Path) -> int | None:
+    """PID of the live process holding an engine lock file (0 if unknown), or None if nobody holds it.
+
+    Locks are flock()-based, so a crashed engine never leaves a stale lock behind."""
+    if not path.exists():
+        return None
+    with open(path, "a+") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            fh.seek(0)
+            raw = fh.read().strip()
+            return int(raw) if raw.isdigit() else 0
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return None
+
+
 @dataclass
 class RunSummary:
     reason: str
@@ -74,11 +91,14 @@ class Orchestrator:
     # ---- lifecycle -------------------------------------------------------
     def _acquire_lock(self) -> None:
         path = self.cfg.home / "engine.lock"
-        self._lock_fd = open(path, "w")
+        self._lock_fd = open(path, "a+")
         try:
             fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise EngineLocked("another orchestrator instance is running")
+        # Opened without truncation: a failed attempt must not wipe the running engine's PID.
+        self._lock_fd.seek(0)
+        self._lock_fd.truncate()
         self._lock_fd.write(str(os.getpid()))
         self._lock_fd.flush()
 

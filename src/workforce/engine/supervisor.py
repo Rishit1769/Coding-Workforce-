@@ -49,11 +49,14 @@ class Supervisor:
         self._lock_fd = None
 
     def _lock(self) -> None:
-        self._lock_fd = open(self.central.cfg.home / "supervisor.lock", "w")
+        self._lock_fd = open(self.central.cfg.home / "supervisor.lock", "a+")
         try:
             fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise SupervisorLocked("another workforce supervisor is already running")
+        # Opened without truncation: a failed attempt must not wipe the running engine's PID.
+        self._lock_fd.seek(0)
+        self._lock_fd.truncate()
         self._lock_fd.write(str(os.getpid()))
         self._lock_fd.flush()
 

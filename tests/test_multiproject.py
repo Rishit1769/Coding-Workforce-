@@ -114,9 +114,9 @@ def test_discovery_explicit_selection_and_switching(central, tmp_path):
     assert find_marker(a / "src" / "deep" / "dir") == a / MARKER
     assert reg.resolve(cwd=a / "src" / "deep" / "dir").name == "anvikra"
     assert reg.resolve(cwd=b).name == "yantra"
-    # outside any project with several registered: explicit selection required
-    with pytest.raises(ProjectError, match="no active project"):
-        reg.resolve(cwd=outside)
+    # outside any project, with nothing selected, the YANTRA default project is used
+    fallback = reg.resolve(cwd=outside)
+    assert fallback.name == "yantra" and fallback.source == "default project"
     # project use (switching) is the fallback outside a repository ...
     reg.use("yantra")
     assert reg.resolve(cwd=outside).name == "yantra"
@@ -133,6 +133,12 @@ def test_discovery_explicit_selection_and_switching(central, tmp_path):
         ProjectRegistry(central, global_selector=str(outside)).resolve(cwd=a)
     reg.use(None)
     assert reg.current() is None
+    # without a YANTRA project and with several registered, explicit selection is required
+    reg2 = ProjectRegistry(build_app(cfg=central_cfg(tmp_path / "engine2"), stderr_logs=False))
+    reg2.register(make_repo(tmp_path, "c"), name="alpha")
+    reg2.register(make_repo(tmp_path, "d"), name="beta")
+    with pytest.raises(ProjectError, match="no active project"):
+        reg2.resolve(cwd=outside)
 
 
 def test_cli_from_any_directory(central, tmp_path, monkeypatch):
@@ -156,8 +162,12 @@ def test_cli_from_any_directory(central, tmp_path, monkeypatch):
     # approve inside ANVIKRA only
     assert "approved 3 requirements in anvikra" in runner.invoke(cli, ["req", "approve"]).output
     monkeypatch.chdir(tmp_path)
+    # outside every repository the YANTRA default applies (it has no requirements yet)
     r = runner.invoke(cli, ["req", "list"])
-    assert r.exit_code == 2 and "no active project" in r.output
+    assert r.exit_code == 0 and "FR-1" not in r.output
+    assert runner.invoke(cli, ["project", "use", "anvikra"]).exit_code == 0
+    r = runner.invoke(cli, ["project", "status", "--json"])
+    assert json.loads(r.output)["name"] == "anvikra"
     assert runner.invoke(cli, ["project", "use", "yantra"]).exit_code == 0
     r = runner.invoke(cli, ["project", "status", "--json"])
     assert json.loads(r.output)["name"] == "yantra"

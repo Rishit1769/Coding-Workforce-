@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 workforce = "workforce.cli:main"
+force = "workforce.force:main"
 
 [build-system]
 requires = ["hatchling"]

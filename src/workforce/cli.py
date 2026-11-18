@@ -297,6 +297,22 @@ def project_use(selector: Optional[str] = typer.Argument(None, help="Project nam
     console.print(f"current project -> {c.name} ({c.repo})")
 
 
+@project_app.command("default")
+def project_default(selector: Optional[str] = typer.Argument(None, help="Project name or absolute path"),
+                    clear: bool = typer.Option(False, "--clear", help="Remove the configured default"),
+                    config: Optional[Path] = ConfigOpt) -> None:
+    """Set the fallback project used when nothing else selects one (default: a project named "yantra")."""
+    reg = _registry(config)
+    try:
+        if clear:
+            reg.set_default(None)
+        elif selector:
+            reg.set_default(selector)
+    except ProjectError as e:
+        _fail(str(e))
+    console.print(f"default project: {reg.default() or '-'}")
+
+
 @project_app.command("status")
 def project_status(selector: Optional[str] = typer.Argument(None, help="Project name or absolute path"),
                    as_json: bool = typer.Option(False, "--json"), config: Optional[Path] = ConfigOpt) -> None:
@@ -555,41 +571,42 @@ def run_cmd(config: Optional[Path] = ConfigOpt,
 @app.command()
 def start(config: Optional[Path] = ConfigOpt, unattended: bool = typer.Option(False),
           all_projects: bool = typer.Option(False, "--all-projects")) -> None:
-    """Start the engine as a detached background process (logs in the state directory)."""
-    import subprocess
-    import sys
+    """Start the engine as a detached background process. Refuses if one is already running."""
+    from workforce.launcher import launch_all, launch_project
 
     reg = _registry(config)
-    args = [sys.executable, "-m", "workforce.cli"]
-    log_dir = reg.central.cfg.log_dir
+    if unattended:
+        _unattended_ok(reg.central)
+    ctx = None
     if not all_projects:
         try:
-            c = reg.resolve(None)
-            args += ["--project", str(c.repo)]
-            log_dir = c.app.cfg.log_dir
+            ctx = reg.resolve(None)
         except ProjectError:
-            all_projects = True
-    args += ["run", "--until-idle"] + (["--all-projects"] if all_projects else [])
-    if unattended:
-        args.append("--unattended")
-    if config:
-        args += ["--config", str(config.resolve())]
-    out = open(log_dir / "engine.out.log", "a")
-    proc = subprocess.Popen(args, stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
-    console.print(f"engine started in background (pid {proc.pid}); log: {log_dir / 'engine.out.log'}")
+            ctx = None
+    res = launch_all(reg, config, unattended) if ctx is None else launch_project(ctx, config, unattended)
+    console.print(res.message)
+    if not res.started and res.pid is None:
+        raise typer.Exit(1)
 
 
 def _set_run_state(config: Optional[Path], state: str, all_: bool) -> None:
+    from workforce.launcher import running_engine, running_supervisor
+
     if all_:
-        a = _app(config)
-        with a.db.session() as s:
-            control.request_run_state(s, state, "human")
-        console.print(f"engine-wide run state -> {state}")
-        return
-    c = _ctx(config)
-    with c.app.db.session() as s:
+        reg = _registry(config)
+        running = running_supervisor(reg) is not None
+        target, label = reg.central, "engine-wide"
+    else:
+        c = _ctx(config)
+        running = running_engine(c)[0] is not None
+        target, label = c.app, c.name
+    if state == "stopping" and not running:
+        state = "stopped"  # nothing to stop: record a clean state instead of a pending stop request
+    with target.db.session() as s:
         control.request_run_state(s, state, "human")
-    console.print(f"{c.name}: run state -> {state}")
+    note = "" if running else " (no engine is running" + (
+        "; it will start paused)" if state == "paused" else ")")
+    console.print(f"{label}: run state -> {state}{note}")
 
 
 AllOpt = typer.Option(False, "--all", help="Apply to the multi-project engine (every project) instead of the active project")
