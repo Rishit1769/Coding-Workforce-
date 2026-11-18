@@ -244,5 +244,400 @@ def req_trace(project: str, fmt: str = typer.Option("markdown", "--format", help
         print(matrix_markdown(rows))
 
 
+# ---------------------------------------------------------------------------
+# Orchestration lifecycle
+# ---------------------------------------------------------------------------
+
+def build_adapters(cfg) -> dict:
+    """Real CLI adapters, plus the scripted self-test adapter only if a role is explicitly configured for it."""
+    import importlib
+    import os
+
+    from workforce.providers.registry import default_adapters
+
+    adapters = default_adapters(cfg)
+    if any(rc.provider == "scripted" for rc in cfg.roles.values()):
+        spec = os.environ.get("WORKFORCE_SCRIPTED_FACTORY", "workforce.selftest.scenario:factory_from_env")
+        mod, fn = spec.split(":")
+        adapters["scripted"] = getattr(importlib.import_module(mod), fn)()
+    return adapters
+
+
+def _orchestrator(a: App):
+    from workforce.engine.orchestrator import Orchestrator
+
+    return Orchestrator(a, adapters=build_adapters(a.cfg))
+
+
+@app.command()
+def plan(project: str, feedback: str = typer.Option("", help="Guidance for re-planning"),
+         config: Optional[Path] = ConfigOpt) -> None:
+    """Run the Architect on approved requirements and request architecture approval."""
+    import asyncio
+
+    from workforce.engine.planning import PlanningError, run_architecture
+
+    a = _app(config)
+    orch = _orchestrator(a)
+    with a.db.session() as s:
+        pid = _project(s, project).id
+    try:
+        result = asyncio.run(run_architecture(a.db, a.cfg, orch.agents, pid, feedback))
+    except PlanningError as e:
+        console.print(f"[red]planning failed:[/] {e}")
+        raise typer.Exit(1)
+    console.print(f"architecture proposed: {len(result['decisions'])} decisions, {len(result['tasks'])} tasks")
+    console.print(f"see {a.cfg.home / 'projects' / project / 'architecture.md'}; approve with `workforce approvals`")
+
+
+@app.command("approvals")
+def approvals_list(config: Optional[Path] = ConfigOpt, all_: bool = typer.Option(False, "--all")) -> None:
+    """List approval requests (pending by default)."""
+    a = _app(config)
+    with a.db.session() as s:
+        q = select(m.Approval).order_by(m.Approval.id)
+        if not all_:
+            q = q.where(m.Approval.status == "pending")
+        t = Table("id", "kind", "status", "subject")
+        for ap in s.scalars(q):
+            t.add_row(str(ap.id), ap.kind, ap.status, ap.subject[:110])
+        console.print(t)
+
+
+@app.command("approve")
+def approve_cmd(approval_id: int, comment: str = typer.Option(None), config: Optional[Path] = ConfigOpt) -> None:
+    """Approve a request (architecture, integration, clarification, promote, ...)."""
+    from workforce.engine.orchestrator import approve
+
+    a = _app(config)
+    ap = approve(a, approval_id, True, "human", comment)
+    console.print(f"approved #{ap.id} ({ap.kind})")
+
+
+@app.command("reject")
+def reject_cmd(approval_id: int, comment: str = typer.Option(None), config: Optional[Path] = ConfigOpt) -> None:
+    from workforce.engine.orchestrator import approve
+
+    a = _app(config)
+    ap = approve(a, approval_id, False, "human", comment)
+    console.print(f"rejected #{ap.id} ({ap.kind})")
+
+
+@app.command("run")
+def run_cmd(config: Optional[Path] = ConfigOpt,
+            until_idle: bool = typer.Option(True, "--until-idle/--forever",
+                                            help="Stop automatically when no approved actionable work remains"),
+            unattended: bool = typer.Option(False, help="Unattended mode (requires a passing safety check)"),
+            max_seconds: float = typer.Option(None, help="Hard wall-clock limit")) -> None:
+    """Run the orchestration engine in the foreground."""
+    import asyncio
+
+    from workforce.daemon import unattended_allowed
+    from workforce.engine.orchestrator import EngineLocked
+
+    a = _app(config)
+    if unattended:
+        with a.db.session() as s:
+            ok, why = unattended_allowed(control.get_flag(s, "safety_check"))
+        if not ok:
+            console.print(f"[red]unattended mode refused:[/] {why}")
+            raise typer.Exit(2)
+        a.cfg.mode = "unattended"
+        a.cfg.require_integration_approval = False
+    orch = _orchestrator(a)
+    try:
+        summary = asyncio.run(orch.run(until_idle=until_idle, max_seconds=max_seconds))
+    except EngineLocked as e:
+        console.print(f"[red]{e}[/]")
+        raise typer.Exit(3)
+    console.print(f"engine stopped: {summary.reason}")
+    console.print(f"completed={summary.completed} blocked={summary.blocked} waiting={summary.waiting}")
+
+
+@app.command()
+def start(config: Optional[Path] = ConfigOpt, unattended: bool = typer.Option(False)) -> None:
+    """Start the engine as a detached background process (logs in <home>/logs)."""
+    import subprocess
+    import sys
+
+    a = _app(config)
+    args = [sys.executable, "-m", "workforce.cli", "run", "--until-idle"]
+    if unattended:
+        args.append("--unattended")
+    if config:
+        args += ["--config", str(config.resolve())]
+    out = open(a.cfg.log_dir / "engine.out.log", "a")
+    proc = subprocess.Popen(args, stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
+    console.print(f"engine started in background (pid {proc.pid})")
+
+
+def _set_run_state(config: Optional[Path], state: str) -> None:
+    a = _app(config)
+    with a.db.session() as s:
+        control.request_run_state(s, state, "human")
+    console.print(f"run state -> {state}")
+
+
+@app.command()
+def pause(config: Optional[Path] = ConfigOpt) -> None:
+    """Pause scheduling; in-flight steps finish, no new steps start."""
+    _set_run_state(config, "paused")
+
+
+@app.command()
+def resume(config: Optional[Path] = ConfigOpt) -> None:
+    """Resume a paused engine."""
+    _set_run_state(config, "running")
+
+
+@app.command()
+def stop(config: Optional[Path] = ConfigOpt) -> None:
+    """Gracefully stop the engine (in-flight steps get a grace period, then are cancelled)."""
+    _set_run_state(config, "stopping")
+
+
+task_app = typer.Typer(help="Inspect and control individual tasks.")
+app.add_typer(task_app, name="task")
+
+
+def _task(s, key: str, project: str | None) -> m.Task:
+    q = select(m.Task).where(m.Task.key == key)
+    if project:
+        q = q.where(m.Task.project_id == _project(s, project).id)
+    rows = s.scalars(q).all()
+    if len(rows) != 1:
+        raise typer.BadParameter(f"task {key} not found or ambiguous (use --project)")
+    return rows[0]
+
+
+@task_app.command("list")
+def task_list(project: Optional[str] = typer.Argument(None), config: Optional[Path] = ConfigOpt) -> None:
+    a = _app(config)
+    with a.db.session() as s:
+        q = select(m.Task).order_by(m.Task.id)
+        if project:
+            q = q.where(m.Task.project_id == _project(s, project).id)
+        t = Table("key", "state", "role", "attempts", "deps", "requirements", "title", "blocked reason")
+        for x in s.scalars(q):
+            t.add_row(x.key, x.state, x.assigned_role or "-", str(x.attempts), ",".join(x.depends_on),
+                      ",".join(x.requirement_keys), x.title[:40], (x.blocked_reason or "")[:60])
+        console.print(t)
+
+
+@task_app.command("show")
+def task_show(key: str, project: Optional[str] = typer.Option(None), config: Optional[Path] = ConfigOpt) -> None:
+    a = _app(config)
+    with a.db.session() as s:
+        t = _task(s, key, project)
+        console.print(f"[bold]{t.key}[/] {t.title} — {t.state} (attempts {t.attempts})")
+        console.print(t.description)
+        for e in t.events:
+            console.print(f"  {e.ts:%H:%M:%S} {e.from_state} -> {e.to_state}: {e.reason[:150]}")
+        for fb in t.feedback:
+            console.print(f"  [yellow]feedback[/] {fb.get('source')}/{fb.get('type')}: {fb.get('message', '')[:200]}")
+
+
+@task_app.command("retry")
+def task_retry(key: str, project: Optional[str] = typer.Option(None), config: Optional[Path] = ConfigOpt) -> None:
+    """Retry a BLOCKED/FAILED task with a fresh correction budget."""
+    from workforce.engine.state import transition
+
+    a = _app(config)
+    with a.db.session() as s:
+        t = _task(s, key, project)
+        if t.state not in ("BLOCKED", "FAILED"):
+            raise typer.BadParameter(f"{key} is {t.state}, not BLOCKED/FAILED")
+        t.attempts, t.failure_signatures, t.assigned_role = 0, [], None
+        transition(s, t, "READY", "human retry", actor="human")
+    console.print(f"{key} -> READY")
+
+
+@task_app.command("cancel")
+def task_cancel(key: str, project: Optional[str] = typer.Option(None), config: Optional[Path] = ConfigOpt) -> None:
+    """Cancel a task (a running step is interrupted)."""
+    a = _app(config)
+    with a.db.session() as s:
+        t = _task(s, key, project)
+        control.set_flag(s, f"task_hold:{t.id}", "cancel")
+        control.audit(s, "human", "task.cancel_requested", {"key": key}, t.project_id, t.id)
+    console.print(f"cancel requested for {key} (applied by the engine; immediate if the engine is not running)")
+    _apply_holds_if_idle(a)
+
+
+@task_app.command("pause")
+def task_pause(key: str, project: Optional[str] = typer.Option(None), config: Optional[Path] = ConfigOpt) -> None:
+    a = _app(config)
+    with a.db.session() as s:
+        t = _task(s, key, project)
+        control.set_flag(s, f"task_hold:{t.id}", "pause")
+    console.print(f"pause requested for {key}")
+    _apply_holds_if_idle(a)
+
+
+@task_app.command("resume")
+def task_resume(key: str, project: Optional[str] = typer.Option(None), config: Optional[Path] = ConfigOpt) -> None:
+    from workforce.engine.state import transition
+
+    a = _app(config)
+    with a.db.session() as s:
+        t = _task(s, key, project)
+        if t.state != "PAUSED":
+            raise typer.BadParameter(f"{key} is not paused")
+        transition(s, t, t.paused_from or "READY", "resumed by human", actor="human")
+    console.print(f"{key} resumed")
+
+
+def _apply_holds_if_idle(a: App) -> None:
+    from workforce.engine.orchestrator import EngineLocked, Orchestrator
+
+    orch = Orchestrator(a, adapters={})
+    try:
+        orch._acquire_lock()
+    except EngineLocked:
+        return  # the running engine applies the hold
+    try:
+        orch._apply_holds()
+    finally:
+        orch._release_lock()
+
+
+@app.command()
+def report(project: Optional[str] = typer.Argument(None), config: Optional[Path] = ConfigOpt) -> None:
+    """Generate a progress report (markdown) from real orchestration state."""
+    from workforce.reporting import progress_report
+
+    a = _app(config)
+    with a.db.session() as s:
+        md = progress_report(s, a.cfg, _project(s, project).id if project else None)
+    out = a.cfg.artifact_dir / "progress_report.md"
+    out.write_text(md)
+    print(md)
+    console.print(f"[dim]written to {out}[/]")
+
+
+integrate_app = typer.Typer(help="Integration branch operations.")
+app.add_typer(integrate_app, name="integrate")
+
+
+@integrate_app.command("promote")
+def integrate_promote(project: str, config: Optional[Path] = ConfigOpt) -> None:
+    """Fast-forward the protected target branch to the integration branch (requires an approved 'promote' request)."""
+    from workforce.gitops.repo import GitRepo
+
+    a = _app(config)
+    with a.db.session() as s:
+        p = _project(s, project)
+        if control.approval_status(s, "promote", p.id) != "approved":
+            console.print("[red]promotion requires an approved 'promote' request (workforce approvals)[/]")
+            raise typer.Exit(2)
+        repo_path, pid = p.repo_path, p.id
+    git = GitRepo(repo_path, a.cfg.policy)
+    integ, target = f"wf/{project}/integration", a.cfg.git.target_branch
+    if not git.is_ancestor(target, integ):
+        console.print(f"[red]{target} has diverged from {integ}; refusing non-fast-forward promotion[/]")
+        raise typer.Exit(2)
+    if git.current_branch() == target:
+        if not git.is_clean():
+            console.print(f"[red]{target} checkout has uncommitted changes; refusing[/]")
+            raise typer.Exit(2)
+        git.git("merge", "--ff-only", integ)
+    else:
+        git.git("fetch", ".", f"{integ}:{target}")
+    pushed = "not pushed (push not authorized in config)"
+    if a.cfg.git.push_authorized:
+        r = git.git("push", a.cfg.git.remote, target, check=False)
+        pushed = "pushed" if r.returncode == 0 else f"push failed: {r.stderr.strip()[:200]}"
+    with a.db.session() as s:
+        control.audit(s, "human", "integration.promoted", {"target": target, "head": git.rev(target), "push": pushed},
+                      project_id=pid)
+    console.print(f"{target} -> {git.rev(target)[:10]}; {pushed}")
+
+
+@integrate_app.command("rollback")
+def integrate_rollback(project: str, key: str, config: Optional[Path] = ConfigOpt) -> None:
+    """Revert an integrated task on the integration branch (non-destructive revert commit)."""
+    from workforce.engine.state import transition
+    from workforce.gitops.repo import GitRepo
+
+    a = _app(config)
+    with a.db.session() as s:
+        p = _project(s, project)
+        t = _task(s, key, project)
+        if not t.integrated_commit:
+            raise typer.BadParameter(f"{key} has not been integrated")
+        git = GitRepo(p.repo_path, a.cfg.policy)
+        iwt = git.add_worktree(a.cfg.worktree_dir / p.name / "_integration", f"wf/{p.name}/integration")
+        merges = [c for c in s.scalars(select(m.Commit).where(m.Commit.task_id == t.id, m.Commit.role == "devops"))]
+        log_ = git.out("log", "--merges", "--format=%H %s", f"{t.base_commit}..{t.integrated_commit}", cwd=iwt)
+        shas = [line.split()[0] for line in log_.splitlines() if f"({t.key})" in line]
+        for sha in shas:
+            git.revert(iwt, sha)
+        control.audit(s, "human", "integration.rollback", {"task": key, "reverted": shas, "merges": len(merges)},
+                      p.id, t.id)
+        t.integrated_commit = None
+        transition(s, t, "BLOCKED", "rolled back by human", actor="human")
+    console.print(f"reverted {len(shas)} merge commit(s) for {key}")
+
+
+@app.command("safety-check")
+def safety_check(config: Optional[Path] = ConfigOpt,
+                 skip_tests: bool = typer.Option(False, help="Only run configuration checks")) -> None:
+    """Run safety checks + the workforce test-suite; a pass enables unattended mode for this code version."""
+    from workforce.daemon import config_checks, run_test_suite, safety_record
+
+    a = _app(config)
+    with a.db.session() as s:
+        roles = {r.role: r.available for r in s.scalars(select(m.RoleStatus))}
+    checks = config_checks(a.cfg, roles)
+    suite = {"ok": False, "detail": "skipped"} if skip_tests else run_test_suite(Path(__file__).resolve().parents[2])
+    rec = safety_record(checks, suite)
+    with a.db.session() as s:
+        control.set_flag(s, "safety_check", json.dumps(rec))
+        control.audit(s, "human", "safety.check", {"passed": rec["passed"]})
+    t = Table("check", "ok", "detail")
+    for c in checks + [{"check": "workforce test-suite", **suite}]:
+        t.add_row(c["check"], "[green]yes[/]" if c["ok"] else "[red]NO[/]", str(c["detail"])[:80])
+    console.print(t)
+    console.print("[green]PASSED[/] unattended mode enabled" if rec["passed"] else "[red]FAILED[/] unattended mode stays disabled")
+    if not rec["passed"]:
+        raise typer.Exit(1)
+
+
+daemon_app = typer.Typer(help="macOS launchd background operation.")
+app.add_typer(daemon_app, name="daemon")
+
+
+@daemon_app.command("install")
+def daemon_install(config: Path = typer.Option(Path("workforce.yaml"), "--config", "-c"),
+                   load: bool = typer.Option(True)) -> None:
+    """Install a LaunchAgent that runs the engine unattended (requires a passing safety check)."""
+    from workforce import daemon
+    from workforce.daemon import unattended_allowed
+
+    a = _app(config)
+    with a.db.session() as s:
+        ok, why = unattended_allowed(control.get_flag(s, "safety_check"))
+    if not ok:
+        console.print(f"[red]refusing to install unattended daemon:[/] {why}")
+        raise typer.Exit(2)
+    p = daemon.install(a.cfg, config, load=load)
+    console.print(f"installed {p}")
+
+
+@daemon_app.command("uninstall")
+def daemon_uninstall() -> None:
+    from workforce import daemon
+
+    daemon.uninstall()
+    console.print("uninstalled")
+
+
+@daemon_app.command("status")
+def daemon_status() -> None:
+    from workforce import daemon
+
+    console.print(daemon.status())
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
