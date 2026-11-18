@@ -603,6 +603,19 @@ def safety_check(config: Optional[Path] = ConfigOpt,
         raise typer.Exit(1)
 
 
+@app.command()
+def serve(config: Optional[Path] = ConfigOpt, port: int = typer.Option(None)) -> None:
+    """Serve the control API and dashboard on 127.0.0.1 (default port 8765)."""
+    from workforce.api.server import DASHBOARD_DIR
+    from workforce.api.server import serve as _serve
+
+    a = _app(config)
+    if not DASHBOARD_DIR.exists():
+        console.print("[yellow]dashboard not built; run `npm run build` in dashboard/ (API still available)[/]")
+    console.print(f"dashboard: http://{a.cfg.dashboard.host}:{port or a.cfg.dashboard.port}/")
+    _serve(a, port=port)
+
+
 daemon_app = typer.Typer(help="macOS launchd background operation.")
 app.add_typer(daemon_app, name="daemon")
 
