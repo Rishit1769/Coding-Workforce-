@@ -59,8 +59,9 @@ uv venv --python 3.12 && uv pip install -e ".[dev]"
 cd dashboard && npm ci && npm run build && cd ..
 ```
 
-Make `workforce` available everywhere, without activating the virtualenv. This symlinks
-`~/.local/bin/workforce` to the engine's entry point:
+Make `workforce` and the short `force` command available everywhere, without activating the virtualenv.
+This symlinks `~/.local/bin/workforce` and `~/.local/bin/force` to the engine's entry points, and never
+overwrites a different existing `force`:
 
 ```bash
 ./scripts/install_global.sh
@@ -79,6 +80,28 @@ workforce models verify
 central config is always resolved from the engine directory, never from your current directory; override it
 with `--config` or `$WORKFORCE_CONFIG`. `models verify` sends one tiny prompt per distinct model and records
 which roles are available, using a small amount of subscription quota.
+
+## The `force` command
+
+`force` is the short form of `workforce`:
+
+```bash
+force
+```
+
+On its own it starts the workforce in the background for the active project:
+
+- the repository you are in (nearest `.workforce.yaml`);
+- else `force project use NAME`;
+- else the default project: YANTRA, or whatever `force project default NAME` sets.
+
+`force --project /abs/path` targets a specific project. Every `workforce` subcommand works unchanged after
+`force`: `force status`, `force plan`, `force pause`, `force resume`, `force stop`, `force project list`,
+`force --help`.
+
+Only one engine runs per project. `force` and `force start` refuse to start a second one, also while the
+multi-project daemon is running, and report the PID of the running engine. `force stop` stops it
+gracefully.
 
 ## Running projects from any directory
 

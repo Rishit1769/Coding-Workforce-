@@ -39,7 +39,10 @@ the central database and keep working unchanged.
 | `plan NAME [--feedback TEXT]` | Run the Architect; requests architecture approval |
 | `approvals [--all]` / `approve ID [--comment]` / `reject ID` | Approval gates |
 | `run [--all-projects] [--until-idle\|--forever] [--unattended] [--max-seconds N]` | Run the engine for the active project, or every project in one process |
-| `start [--unattended]` | Start the engine in the background (`logs/engine.out.log`) |
+| `force` | Start the engine in the background for the active project (default project: YANTRA); refuses duplicates |
+| `force <command>` | Same as `workforce <command>` |
+| `project default [NAME\|PATH] [--clear]` | Fallback project when nothing else selects one (built-in fallback: `yantra`) |
+| `start [--unattended] [--all-projects]` | Start the engine in the background (`logs/engine.out.log`); refuses if one is already running |
 | `pause` / `resume` / `stop` `[--all]` | Run-state control (graceful); `--all` targets the multi-project engine |
 | `status [--json]` | Run state, heartbeat, task counts, roles, pending approvals |
 | `task list [NAME]` / `task show KEY` | Task inspection |
