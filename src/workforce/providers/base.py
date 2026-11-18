@@ -41,6 +41,7 @@ class ErrorKind(StrEnum):
     CIRCUIT_OPEN = "circuit_open"
     BUDGET = "budget"
     NOT_INSTALLED = "not_installed"
+    POLICY = "policy"
 
 
 TRANSIENT = {ErrorKind.NETWORK, ErrorKind.PROVIDER_ERROR, ErrorKind.TIMEOUT, ErrorKind.INVALID_OUTPUT}
