@@ -49,6 +49,8 @@ workforce marks those roles unavailable and never substitutes another model on i
 
 ## Install
 
+The engine stays in its installation directory (this repository). Install it once:
+
 ```bash
 uv venv --python 3.12 && uv pip install -e ".[dev]"
 ```
@@ -57,78 +59,177 @@ uv venv --python 3.12 && uv pip install -e ".[dev]"
 cd dashboard && npm ci && npm run build && cd ..
 ```
 
+Make `workforce` available everywhere, without activating the virtualenv. This symlinks
+`~/.local/bin/workforce` to the engine's entry point:
+
 ```bash
-.venv/bin/workforce init
+./scripts/install_global.sh
 ```
 
 ```bash
-.venv/bin/workforce models verify
+workforce init
 ```
 
-`init` writes `workforce.yaml` (official role assignments and safe defaults; see
-`workforce.example.yaml`) and creates the state database in `.workforce/`. `models verify` sends one tiny
-prompt per distinct model and records which roles are available. It uses a small amount of subscription
-quota.
+```bash
+workforce models verify
+```
+
+`init` writes the central `workforce.yaml` (official role assignments and safe defaults; see
+`workforce.example.yaml`) in the engine directory and creates the central state in `.workforce/`. The
+central config is always resolved from the engine directory, never from your current directory; override it
+with `--config` or `$WORKFORCE_CONFIG`. `models verify` sends one tiny prompt per distinct model and records
+which roles are available, using a small amount of subscription quota.
+
+## Running projects from any directory
+
+Register each existing git repository once, by absolute path:
+
+```bash
+workforce project register "$HOME/Code/ANVIKRA" --docs "$HOME/Code/ANVIKRA/docs/specs" --test-command "python -m pytest -q"
+```
+
+```bash
+workforce project register "$HOME/Code/YANTRA" --name yantra --test-command "npm test"
+```
+
+```bash
+workforce project register /Volumes/Work/client-portal --name client-portal --docs /Volumes/Work/client-portal/requirements
+```
+
+Registration:
+
+- writes a `.workforce.yaml` marker in the repository root (excluded from git via `.git/info/exclude`);
+- creates a separate state directory, `<engine>/.workforce/homes/<name>/`, holding that project's database,
+  task history, executions, approvals, logs, worktrees, preserved documents and reports;
+- namespaces all of its branches as `wf/<name>/…`.
+
+Projects never share documentation, worktrees, branches, task queues or execution history.
+
+After that, run commands from anywhere inside a repository. The project is found by searching upward for
+`.workforce.yaml`:
+
+```bash
+cd "$HOME/Code/ANVIKRA/backend/services" && workforce req list && workforce plan && workforce run
+```
+
+You can also select a project explicitly from any directory:
+
+```bash
+workforce --project "$HOME/Code/YANTRA" project status
+```
+
+Or set a current project for commands run outside any repository:
+
+```bash
+workforce project use anvikra
+```
+
+The active project is resolved in this order:
+
+1. a project argument to the command (name or absolute path);
+2. `--project /abs/path` or `$WORKFORCE_PROJECT`;
+3. the nearest `.workforce.yaml` above the current directory;
+4. a registered repository that contains the current directory;
+5. `workforce project use`;
+6. the only registered project, if there is just one.
+
+Useful commands:
+
+| Command | Purpose |
+|---|---|
+| `workforce project list` | All registered projects (`*` marks the current one), status, task progress and state directory |
+| `workforce project status [NAME\|PATH]` | One project in detail: requirements, tasks, blockers, pending approvals, branches |
+| `workforce project use NAME\|PATH` / `--clear` | Switch the current project |
+| `workforce status` | Engine-wide view of the daemon and every project |
+| `workforce run --all-projects` | One engine process schedules every registered project |
+| `workforce pause --all` / `resume --all` / `stop --all` | Control the multi-project engine; without `--all` they act on the active project |
+
+The daemon (`workforce daemon install`) runs `workforce run --all-projects`. All projects share:
+
+- each provider's concurrency limit and hourly call budget;
+- role availability and circuit breakers;
+- a global developer cap, `limits.max_total_dev_concurrency` (default 2), with each developer role working
+  on one task at a time across all projects.
+
+Per-project overrides go in the project's `.workforce.yaml`:
+
+```yaml
+project: yantra
+repo: /Users/you/Code/YANTRA
+overrides:
+  target_branch: develop
+  max_dev_concurrency: 1
+  require_integration_approval: true
+  extra_allowed_commands: ["npm test"]
+```
+
+Agents are confined to their own project. They can only be started inside that project's worktrees or
+repository, each CLI's sandbox limits writes to that directory, and the engine snapshots every registered
+repository (and the engine itself) around each agent run. A change outside the agent's workspace rejects
+that run (`policy.workspace_guard: block`, or `warn` to only report it). If you edit your own checkout
+while agents are running, use `warn`.
 
 ## Submit a project
 
-1. Put your documents (Markdown, text, PDF, DOCX, JSON, YAML, OpenAPI) in a folder. The target repository must be a git repository.
-2. Register the project and ingest the documents:
+1. Put your documents (Markdown, text, PDF, DOCX, JSON, YAML, OpenAPI) in a folder, register the repository
+   and ingest them:
 
    ```bash
-   .venv/bin/workforce project create myapp --repo ~/code/myapp --docs ~/specs/myapp --test-command "python -m pytest -q"
+   workforce project register "$HOME/Code/ANVIKRA" --docs "$HOME/Code/ANVIKRA/docs/specs"
    ```
 
-3. Review the extracted requirements and the issues found (ambiguities, contradictions, gaps, prompt-injection attempts):
+2. From inside the repository, review the extracted requirements and the issues found (ambiguities,
+   contradictions, gaps, prompt-injection attempts):
 
    ```bash
-   .venv/bin/workforce req list myapp
+   cd "$HOME/Code/ANVIKRA" && workforce req list
    ```
 
-4. Resolve every major issue, optionally amending a requirement's text, then approve:
+3. Resolve every major issue, optionally amending a requirement's text, then approve:
 
    ```bash
-   .venv/bin/workforce req resolve 3 --resolution "max length is 100" --amend "REQ-PRD-9AF8E1=Titles must be at most 100 characters."
-   ```
-
-   ```bash
-   .venv/bin/workforce req approve myapp
-   ```
-
-5. Ask the Architect for a plan, read it (in `.workforce/projects/myapp/architecture.md`), then approve it:
-
-   ```bash
-   .venv/bin/workforce plan myapp
+   workforce req resolve 3 --resolution "max length is 100" --amend "REQ-PRD-9AF8E1=Titles must be at most 100 characters."
    ```
 
    ```bash
-   .venv/bin/workforce approvals
+   workforce req approve
+   ```
+
+4. Ask the Architect for a plan, read it (the path is printed), then approve it:
+
+   ```bash
+   workforce plan
    ```
 
    ```bash
-   .venv/bin/workforce approve <id>
+   workforce approvals
    ```
-
-6. Start the workforce. It stops by itself when no approved actionable work remains:
 
    ```bash
-   .venv/bin/workforce run
+   workforce approve <id>
    ```
 
-7. Watch and steer it from the dashboard or the CLI:
+5. Start the workforce. It stops by itself when no approved actionable work remains:
 
    ```bash
-   .venv/bin/workforce serve
+   workforce run
    ```
 
-   Then open http://127.0.0.1:8765. Useful CLI commands: `status`, `task list`, `task show T-001`,
-   `report myapp`, `req trace myapp`, `pause`, `resume`, `stop`, `task retry T-003`, `task cancel T-004`.
+6. Watch and steer it from the dashboard (its project selector lists every registered project) or the CLI:
 
-8. When every task is complete, the workforce requests a `promote` approval. Approve it, then fast-forward
+   ```bash
+   workforce serve
+   ```
+
+   Then open http://127.0.0.1:8765. Useful CLI commands: `project status`, `task list`,
+   `task show T-001`, `report`, `req trace`, `pause`, `resume`, `stop`, `task retry T-003`,
+   `task cancel T-004`.
+
+7. When every task is complete, the workforce requests a `promote` approval. Approve it, then fast-forward
    your protected target branch:
 
    ```bash
-   .venv/bin/workforce integrate promote myapp
+   workforce integrate promote
    ```
 
 ## Operating modes

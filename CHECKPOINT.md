@@ -18,6 +18,20 @@ external blockers (listed below), not unfinished code.
 | 9 Dashboard (API + Next.js) | done | `tests/test_api.py`, `dashboard/e2e` (Playwright, 3 pass) |
 | 10 End-to-end validation | done | `docs/validation/README.md`, `docs/validation/live-e2e-report.md` |
 
+## Multi-project extension (2026-11-18)
+
+| Feature | Evidence |
+|---|---|
+| Engine stays in its install directory; central config resolved from it, never from the cwd | `config.engine_root()`; `test_global_command_shim_and_engine_root` |
+| Global `workforce` command without activating the venv | `scripts/install_global.sh` → `~/.local/bin/workforce` |
+| Register existing repositories by absolute path; `.workforce.yaml` upward discovery; `--project /abs/path` | `projects.py`; `test_register_validates_paths_and_writes_marker`, `test_discovery_explicit_selection_and_switching`, `test_cli_from_any_directory` |
+| Isolated per-project state (DB, logs, worktrees, branches, task queues) | `test_two_projects_isolated_under_one_daemon` |
+| One daemon for all projects with shared provider limits, budgets and a global developer cap | `engine/supervisor.py`, `engine/shared.py`; same test plus `test_global_pause_applies_to_all_projects` |
+| `project list`, `project use`, `project status` | CLI tests above |
+| Agents confined to their project's workspaces | `security/workspace.py`; `test_agents_cannot_touch_other_workspaces` |
+| Existing databases, projects and configuration preserved | Migration 0002 (additive); `test_existing_database_and_projects_preserved`; central DB upgraded in place with role-verification data intact (backup: `.workforce/workforce.pre-0002.backup.db`) |
+| Multi-project API and dashboard | `test_api_serves_each_project_from_its_own_state`; Playwright |
+
 ## External blockers
 
 1. **OpenCode Go is not usable on this account.** Every `opencode-go/*` model returns "An active OpenCode
@@ -26,8 +40,8 @@ external blockers (listed below), not unfinished code.
    assignment. With the Tester unavailable, tasks block before development, by design. The live E2E run
    used an explicit, labelled override of the Tester to `opencode/deepseek-v4.1-flash-free` (OpenCode Zen
    free tier, synthetic data only). That override exists only in the live-run config, not in the defaults.
-2. **GitHub publishing.** Remote `origin` is `https://github.com/Rishit1769/Coding-Workforce-.git`.
-   Commits are local. Pushing needs your explicit authorization (the workforce never pushes by default).
+2. **GitHub publishing.** Remote `origin` is `https://github.com/Rishit1769/Coding-Workforce-.git`. The
+   engine itself never pushes unless `git.push_authorized: true`.
 
 ## Known limitations
 
@@ -42,7 +56,11 @@ external blockers (listed below), not unfinished code.
 - System sleep is handled as an interruption: in-flight calls fail or time out and are retried or
   recovered. The engine does not prevent sleep.
 - The dashboard polls every 2.5–10 s. There is no push channel.
-- One orchestrator per state directory. Developer concurrency is capped at 2, matching the spec.
+- One orchestrator per project state directory, and one supervisor per engine installation. Developer
+  concurrency is capped at 2 across all projects (`limits.max_total_dev_concurrency`).
+- The workspace guard compares repository working trees before and after each agent run. With
+  `workspace_guard: block`, your own edits to a registered checkout made during an agent run are
+  indistinguishable from an agent's and reject that run. Use `warn` if you work in the same checkout.
 
 ## Resume instructions
 

@@ -1,8 +1,26 @@
 # Operations
 
-All commands accept `--config/-c PATH` (or `WORKFORCE_CONFIG`). State lives in `<home>` (default
-`.workforce/` next to the config): `workforce.db`, `logs/workforce.jsonl`, `worktrees/`, `artifacts/`,
-`projects/<name>/` (preserved read-only documents, `architecture.md`, `readiness.json`).
+All commands accept `--config/-c PATH` (or `WORKFORCE_CONFIG`). Without it the central config is
+`<engine root>/workforce.yaml`, whatever the current directory. Project commands act on the active project:
+see "Running projects from any directory" in the README for resolution rules, and use
+`workforce --project /abs/path <command>` to choose explicitly.
+
+State layout:
+
+```
+<engine root>/.workforce/                 central: registry (projects table), role availability,
+  workforce.db                              circuit breakers, engine run state, safety check
+  logs/workforce.jsonl                      engine-level log
+  homes/<project>/                          one per registered project (isolated):
+    workforce.db                              requirements, tasks, executions, approvals, audit
+    logs/workforce.jsonl                      this project's log records only
+    worktrees/<project>/…                     task, verification and integration worktrees
+    artifacts/, projects/<project>/           reports, preserved documents, architecture, readiness
+    engine.lock                               one orchestrator per project at a time
+```
+
+Projects registered before multi-project support (`home_path` empty in the registry) keep their state in
+the central database and keep working unchanged.
 
 ## CLI reference
 
@@ -11,16 +29,18 @@ All commands accept `--config/-c PATH` (or `WORKFORCE_CONFIG`). State lives in `
 | `init [PATH]` | Write a default `workforce.yaml` and create the database |
 | `config` | Print the effective configuration |
 | `models verify [--role R]` / `models list` | Probe role models through the real CLIs / show the last results |
-| `project create NAME --repo DIR --docs PATH [--test-command CMD]` | Register and ingest |
-| `project ingest NAME PATH` | Re-ingest; requirements whose text changed need re-approval |
+| `project register /ABS/REPO [--name N] [--docs PATH] [--test-command CMD] [--use]` | Register an existing repository (isolated state, `.workforce.yaml` marker) |
+| `project create NAME --repo /ABS/REPO --docs PATH` | Register and ingest in one step |
+| `project list` / `project use NAME\|PATH` / `project status [NAME\|PATH]` | Registry, switching, per-project status |
+| `project ingest [PROJECT] PATH` | Re-ingest; requirements whose text changed need re-approval |
 | `req list NAME` / `req approve NAME [KEYS…]` / `req reject NAME KEY --reason` | Review and approve requirements |
 | `req resolve ISSUE_ID --resolution TEXT [--amend KEY=TEXT]` | Resolve an ambiguity or contradiction |
 | `req trace NAME [--format markdown\|csv\|json]` | Traceability matrix |
 | `plan NAME [--feedback TEXT]` | Run the Architect; requests architecture approval |
 | `approvals [--all]` / `approve ID [--comment]` / `reject ID` | Approval gates |
-| `run [--until-idle\|--forever] [--unattended] [--max-seconds N]` | Run the engine in the foreground |
+| `run [--all-projects] [--until-idle\|--forever] [--unattended] [--max-seconds N]` | Run the engine for the active project, or every project in one process |
 | `start [--unattended]` | Start the engine in the background (`logs/engine.out.log`) |
-| `pause` / `resume` / `stop` | Run-state control (graceful) |
+| `pause` / `resume` / `stop` `[--all]` | Run-state control (graceful); `--all` targets the multi-project engine |
 | `status [--json]` | Run state, heartbeat, task counts, roles, pending approvals |
 | `task list [NAME]` / `task show KEY` | Task inspection |
 | `task retry KEY` / `task cancel KEY` / `task pause KEY` / `task resume KEY` | Task control |

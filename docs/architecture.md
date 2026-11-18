@@ -29,6 +29,20 @@
 | `dashboard/` | Next.js + TypeScript + Tailwind dashboard (static export), polling the live API |
 | `workforce.daemon` | launchd LaunchAgent and the safety check that gates unattended mode |
 
+## Multiple projects
+
+The engine is installed once. The central database's `projects` table is the registry. Each project
+registered with `workforce project register /abs/path` gets an isolated state home (`.workforce/homes/<name>/`)
+with its own database, logs, worktrees and artifacts, plus a `.workforce.yaml` marker in its repository for
+discovery from any subdirectory (`workforce/projects.py`).
+
+`workforce run --all-projects` and the launchd daemon run a `Supervisor` (`engine/supervisor.py`): one
+orchestrator per project in a single asyncio loop. A `SharedRuntime` (`engine/shared.py`) gives them global
+provider semaphores, hourly budgets counted across every project database, central role availability and
+circuit breakers, a global developer-concurrency cap, one-task-at-a-time developer roles, and engine-wide
+pause/stop. Registry rows that predate multi-project support (`home_path` NULL) keep their state in the
+central database.
+
 ## Task state machine
 
 ```
