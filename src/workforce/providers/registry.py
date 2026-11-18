@@ -149,18 +149,18 @@ class ProviderRegistry:
         return res
 
     async def _run_once(self, adapter, provider, req, role, task_id, project_id) -> ExecutionResult:
-        with self.db.session() as s:
-            ex = Execution(task_id=task_id, project_id=project_id, role=role.value, purpose=req.purpose,
-                           provider=provider, model=req.model, cwd=str(req.cwd))
-            s.add(ex)
-            s.flush()
-            ex_id = ex.id
-
         def on_start(pid: int) -> None:
             with self.db.session() as s2:
                 s2.get(Execution, ex_id).pid = pid
 
+        # The execution record starts when the provider slot is acquired, so queueing time is not run time.
         async with self._sems[provider]:
+            with self.db.session() as s:
+                ex = Execution(task_id=task_id, project_id=project_id, role=role.value, purpose=req.purpose,
+                               provider=provider, model=req.model, cwd=str(req.cwd))
+                s.add(ex)
+                s.flush()
+                ex_id = ex.id
             try:
                 res = await adapter.run(req, on_start=on_start)
             except asyncio.CancelledError:
