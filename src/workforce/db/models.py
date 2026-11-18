@@ -24,6 +24,9 @@ class Project(Base):
     repo_path: Mapped[str] = mapped_column(Text)
     test_command: Mapped[str] = mapped_column(Text, default="python -m pytest -q")
     status: Mapped[str] = mapped_column(String(32), default="ingesting")
+    # Central registry only: directory holding this project's own state (DB, logs, worktrees, artifacts).
+    # NULL means the project's state lives in this same database (single-home / pre-multi-project layout).
+    home_path: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

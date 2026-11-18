@@ -16,8 +16,12 @@ class App:
     db: Database
 
 
-def build_app(config_path: str | Path | None = None, cfg: WorkforceConfig | None = None, stderr_logs: bool = True) -> App:
+def build_app(config_path: str | Path | None = None, cfg: WorkforceConfig | None = None, stderr_logs: bool = True,
+              configure_logging: bool = True) -> App:
+    """`configure_logging=False` is used for per-project apps: logging is process-wide and owned by the
+    central app; project records are routed to the project's own log directory."""
     cfg = cfg or load_config(config_path)
     ensure_dirs(cfg)
-    setup_logging(cfg.log_dir, stderr=stderr_logs)
+    if configure_logging:
+        setup_logging(cfg.log_dir, stderr=stderr_logs)
     return App(cfg=cfg, db=Database(cfg.db_path))
