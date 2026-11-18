@@ -78,7 +78,8 @@ class ExecutionResult(BaseModel):
 _CLASSIFIERS: list[tuple[ErrorKind, re.Pattern[str]]] = [
     (ErrorKind.MODEL_UNAVAILABLE, re.compile(
         r"model[^\n]{0,40}(not found|does not exist|not supported|unavailable|not available)|invalid model|unknown model|"
-        r"hosted outside|ProviderModelNotFound|model_not_found", re.I)),
+        r"hosted outside|ProviderModelNotFound|model_not_found|subscription (is )?required|requires? an active|"
+        r"not entitled|not included in your plan|upgrade your plan", re.I)),
     (ErrorKind.USAGE_LIMIT, re.compile(
         r"usage limit|rate[ _-]?limit|quota|too many requests|\b429\b|limit reached|credit balance|"
         r"out of credits|try again (at|in)|exceeded your", re.I)),

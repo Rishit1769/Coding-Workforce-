@@ -83,7 +83,8 @@ def _default_providers() -> dict[str, ProviderConfig]:
     return {
         "claude_code": ProviderConfig(binary="claude", max_concurrency=2, max_calls_per_hour=40),
         "codex": ProviderConfig(binary="codex", max_concurrency=2, max_calls_per_hour=40),
-        "opencode": ProviderConfig(binary="opencode", max_concurrency=2, max_calls_per_hour=80),
+        # OpenCode keeps a local SQLite database; parallel `opencode run` processes fail with "database is locked".
+        "opencode": ProviderConfig(binary="opencode", max_concurrency=1, max_calls_per_hour=80),
         "scripted": ProviderConfig(binary="", max_concurrency=4, max_calls_per_hour=100000),
     }
 

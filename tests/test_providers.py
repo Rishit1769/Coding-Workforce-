@@ -130,6 +130,9 @@ def test_classify_error():
     assert classify_error("getaddrinfo ENOTFOUND api") == ErrorKind.NETWORK
     assert classify_error("model gpt-x does not exist") == ErrorKind.MODEL_UNAVAILABLE
     assert classify_error("weird") == ErrorKind.PROVIDER_ERROR
+    assert classify_error("An active OpenCode Go subscription is required to use OpenCode Go models.") == \
+        ErrorKind.MODEL_UNAVAILABLE
+    assert classify_error("Error: Unexpected error database is locked") == ErrorKind.PROVIDER_ERROR
 
 
 def test_extract_json():

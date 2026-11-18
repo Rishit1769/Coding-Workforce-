@@ -35,3 +35,4 @@ dashboard/next-env.d.ts
 
 # OS
 .DS_Store
+dashboard/tsconfig.tsbuildinfo
