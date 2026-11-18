@@ -77,7 +77,7 @@ def create_api(wf: App, static_dir: Path | None = DASHBOARD_DIR) -> FastAPI:
     def overview(s=Depends(session)):
         hb = control.get_flag(s, "heartbeat")
         alive = False
-        if hb:
+        if hb and control.get_flag(s, "run_state", "stopped") != "stopped":
             alive = (datetime.now(UTC) - datetime.fromisoformat(hb)).total_seconds() < max(30, wf.cfg.limits.poll_interval_s * 10)
         counts = dict(s.execute(select(m.Task.state, func.count()).group_by(m.Task.state)).all())
         safety = control.get_flag(s, "safety_check")
