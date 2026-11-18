@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Workforce runtime state (never commit)
+.workforce/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+logs/
+worktrees/
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+auth.json
+
+# Node / dashboard
+node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/test-results/
+dashboard/playwright-report/
+dashboard/next-env.d.ts
+
+# OS
+.DS_Store
