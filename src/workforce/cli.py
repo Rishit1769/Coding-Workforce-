@@ -27,10 +27,11 @@ def _app(config: Optional[Path]) -> App:
 
 
 @app.command()
-def init(path: Path = typer.Argument(Path("workforce.yaml"), help="Where to write the config")) -> None:
+def init(path: Optional[Path] = typer.Argument(None, help="Where to write the config (default: <engine root>/workforce.yaml)")) -> None:
     """Create a workforce.yaml with the official role assignments and initialise the database."""
-    from workforce.config import WorkforceConfig
+    from workforce.config import WorkforceConfig, default_config_path
 
+    path = path or default_config_path()
     if not path.exists():
         cfg = WorkforceConfig()
         data = json.loads(cfg.model_dump_json(exclude={"home"}))
@@ -621,7 +622,7 @@ app.add_typer(daemon_app, name="daemon")
 
 
 @daemon_app.command("install")
-def daemon_install(config: Path = typer.Option(Path("workforce.yaml"), "--config", "-c"),
+def daemon_install(config: Optional[Path] = ConfigOpt,
                    load: bool = typer.Option(True)) -> None:
     """Install a LaunchAgent that runs the engine unattended (requires a passing safety check)."""
     from workforce import daemon
@@ -633,7 +634,9 @@ def daemon_install(config: Path = typer.Option(Path("workforce.yaml"), "--config
     if not ok:
         console.print(f"[red]refusing to install unattended daemon:[/] {why}")
         raise typer.Exit(2)
-    p = daemon.install(a.cfg, config, load=load)
+    from workforce.config import default_config_path
+
+    p = daemon.install(a.cfg, config or default_config_path(), load=load)
     console.print(f"installed {p}")
 
 
@@ -652,5 +655,9 @@ def daemon_status() -> None:
     console.print(daemon.status())
 
 
+def main() -> None:
+    app(prog_name="workforce")
+
+
 if __name__ == "__main__":  # pragma: no cover
-    app()
+    main()

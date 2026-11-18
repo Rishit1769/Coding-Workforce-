@@ -26,7 +26,7 @@ dev = [
 ]
 
 [project.scripts]
-workforce = "workforce.cli:app"
+workforce = "workforce.cli:main"
 
 [build-system]
 requires = ["hatchling"]

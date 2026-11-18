@@ -9,6 +9,17 @@ from workforce.app import build_app
 from workforce.config import WorkforceConfig
 
 
+@pytest.fixture(autouse=True)
+def _isolated_engine(tmp_path_factory, monkeypatch):
+    """Never let a test touch the real engine installation's config, state or current-project selection."""
+    root = tmp_path_factory.mktemp("engine")
+    monkeypatch.setenv("WORKFORCE_ENGINE_ROOT", str(root))
+    monkeypatch.delenv("WORKFORCE_CONFIG", raising=False)
+    monkeypatch.delenv("WORKFORCE_HOME", raising=False)
+    monkeypatch.delenv("WORKFORCE_PROJECT", raising=False)
+    return root
+
+
 @pytest.fixture
 def cfg(tmp_path: Path) -> WorkforceConfig:
     c = WorkforceConfig(home=tmp_path / ".workforce")

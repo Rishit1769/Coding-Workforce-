@@ -91,6 +91,8 @@ def _default_providers() -> dict[str, ProviderConfig]:
 
 class LimitsConfig(BaseModel):
     max_dev_concurrency: int = 2
+    # Across all registered projects scheduled by one engine/daemon.
+    max_total_dev_concurrency: int = 2
     max_correction_attempts: int = 3
     task_wall_clock_s: int = 4 * 3600
     command_timeout_s: int = 900
@@ -109,8 +111,10 @@ class PolicyConfig(BaseModel):
     protected_branches: list[str] = Field(default_factory=lambda: ["main", "master", "production", "release"])
     # Paths developers may never modify (relative to the target repo).
     protected_paths: list[str] = Field(default_factory=lambda: [
-        ".workforce/**", "requirements/**", "acceptance_tests/**", ".git/**", ".github/workflows/**",
+        ".workforce/**", ".workforce.yaml", "requirements/**", "acceptance_tests/**", ".git/**", ".github/workflows/**",
     ])
+    # block: an agent run that changes files outside its workspace fails; warn: record a notice only.
+    workspace_guard: Literal["block", "warn"] = "block"
     secret_file_globs: list[str] = Field(default_factory=lambda: [
         ".env", ".env.*", "*.pem", "*.key", "id_rsa*", "auth.json", "credentials*",
     ])
@@ -172,9 +176,31 @@ CONFIG_ENV = "WORKFORCE_CONFIG"
 HOME_ENV = "WORKFORCE_HOME"
 
 
+ENGINE_ROOT_ENV = "WORKFORCE_ENGINE_ROOT"
+
+
+def engine_root() -> Path:
+    """The engine's installation directory (holds the central workforce.yaml and .workforce/ state).
+
+    Independent of the current working directory so `workforce` behaves the same from any folder."""
+    if os.environ.get(ENGINE_ROOT_ENV):
+        return Path(os.environ[ENGINE_ROOT_ENV]).expanduser().resolve()
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").exists() and (parent / "src" / "workforce").exists():
+            return parent
+    return Path.home() / ".workforce-engine"
+
+
+def default_config_path() -> Path:
+    return Path(os.environ[CONFIG_ENV]) if os.environ.get(CONFIG_ENV) else engine_root() / "workforce.yaml"
+
+
 def load_config(path: Path | str | None = None) -> WorkforceConfig:
-    """Load configuration; partial YAML files are merged over defaults."""
-    path = Path(path or os.environ.get(CONFIG_ENV, "workforce.yaml"))
+    """Load configuration; partial YAML files are merged over defaults.
+
+    Resolution: explicit path > $WORKFORCE_CONFIG > <engine root>/workforce.yaml (never the cwd)."""
+    path = Path(path) if path else default_config_path()
     data: dict = {}
     if path.exists():
         data = yaml.safe_load(path.read_text()) or {}
@@ -188,7 +214,7 @@ def load_config(path: Path | str | None = None) -> WorkforceConfig:
     if os.environ.get(HOME_ENV):
         cfg.home = Path(os.environ[HOME_ENV])
     if not cfg.home.is_absolute():
-        cfg.home = (path.parent.resolve() if path.exists() else Path.cwd()) / cfg.home
+        cfg.home = (path.parent.resolve() if path.exists() else engine_root()) / cfg.home
     return cfg
 
 
