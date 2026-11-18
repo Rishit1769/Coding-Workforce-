@@ -43,3 +43,4 @@ markers = [
   "live: tests that call real provider CLIs and consume subscription usage (opt-in via WORKFORCE_LIVE=1)",
 ]
 addopts = "-q"
+pythonpath = ["."]
