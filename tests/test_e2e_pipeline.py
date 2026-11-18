@@ -305,7 +305,12 @@ def test_sigkill_engine_process_and_resume(tmp_path):
     assert run("req", "approve", "textstats").returncode == 0
     r = run("plan", "textstats")
     assert r.returncode == 0, r.stdout + r.stderr
-    app = build_app(cfg=cfg, stderr_logs=False)
+    from workforce.projects import ProjectRegistry
+
+    central = build_app(cfg=cfg, stderr_logs=False)
+    ctx = ProjectRegistry(central).resolve("textstats")
+    assert ctx.isolated and ctx.home == cfg.home / "homes" / "textstats"
+    app = ctx.app  # the project's own state database
     with app.db.session() as s:
         aid = s.scalars(select(Approval).where(Approval.kind == "architecture")).one().id
     assert run("approve", str(aid)).returncode == 0
